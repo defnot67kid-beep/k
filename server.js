@@ -18,6 +18,14 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Data file path
 const GAMES_FILE = path.join(__dirname, 'games.json');
 
+// Installer paths
+const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
+const INSTALLER_PATH = path.join(DOWNLOADS_DIR, 'TavianSetup.exe');
+
+if (!fs.existsSync(DOWNLOADS_DIR)) {
+    fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+}
+
 // Initialize games file
 if (!fs.existsSync(GAMES_FILE)) {
     fs.writeFileSync(GAMES_FILE, JSON.stringify({ 
@@ -57,6 +65,8 @@ app.get('/', (req, res) => {
             'POST /api/games/publish - Publish a new game',
             'GET /api/games - Get all public games',
             'GET /api/games/:gameId - Get a specific game',
+            'GET /api/installer - Get installer info',
+            'GET /download - Download Tavian installer',
             'GET /api/health - Health check'
         ],
         timestamp: new Date().toISOString()
@@ -65,6 +75,34 @@ app.get('/', (req, res) => {
 
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Download Tavian installer
+app.get('/download', (req, res) => {
+    try {
+        if (!fs.existsSync(INSTALLER_PATH)) {
+            return res.status(404).json({
+                error: 'Installer not found'
+            });
+        }
+
+        res.download(INSTALLER_PATH, 'TavianSetup.exe');
+
+    } catch (error) {
+        console.error('❌ Download error:', error);
+        res.status(500).json({
+            error: 'Failed to download installer'
+        });
+    }
+});
+
+// Installer information
+app.get('/api/installer', (req, res) => {
+    res.json({
+        name: 'Tavian',
+        version: '1.0.0',
+        downloadUrl: `${req.protocol}://${req.get('host')}/download`
+    });
 });
 
 // Publish a new game
@@ -238,6 +276,7 @@ app.listen(PORT, '0.0.0.0', () => {
 ║  ✅ CORS enabled                                      ║
 ║  📦 Games stored in: games.json                      ║
 ║  🎮 Game ID format: 9+ digit numbers                 ║
+║  📥 Installer downloads: ${DOWNLOADS_DIR}            ║
 ╠═══════════════════════════════════════════════════════╣
 ║  📌 ENDPOINTS:                                        ║
 ║  POST   /api/games/publish  - Publish new game       ║
@@ -245,6 +284,8 @@ app.listen(PORT, '0.0.0.0', () => {
 ║  GET    /api/games/:id      - Get specific game      ║
 ║  DELETE /api/games/:id      - Delete game            ║
 ║  GET    /api/stats          - Get statistics         ║
+║  GET    /api/installer      - Get installer info     ║
+║  GET    /download           - Download installer     ║
 ║  GET    /api/health         - Health check           ║
 ╚═══════════════════════════════════════════════════════╝
     `);
