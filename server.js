@@ -62,80 +62,6 @@ function writeExeIndex(data) {
     fs.writeFileSync(EXE_INDEX_FILE, JSON.stringify(data, null, 2));
 }
 
-// ==================== ENHANCED BINARY STORAGE FOR GAME DATA ====================
-const BINARY_STORAGE_DIR = path.join(__dirname, 'game_binaries');
-
-if (!fs.existsSync(BINARY_STORAGE_DIR)) {
-    fs.mkdirSync(BINARY_STORAGE_DIR, { recursive: true });
-    console.log('✅ Created game_binaries directory for binary storage');
-}
-
-// Save game data as binary file
-function saveGameBinary(gameId, gameData) {
-    const binaryPath = path.join(BINARY_STORAGE_DIR, `${gameId}.dat`);
-    // Convert game data to binary buffer
-    const dataBuffer = Buffer.from(JSON.stringify(gameData), 'utf-8');
-    fs.writeFileSync(binaryPath, dataBuffer);
-    console.log(`💾 Binary saved: ${gameId}.dat (${dataBuffer.length} bytes)`);
-    return binaryPath;
-}
-
-// Load game data from binary file
-function loadGameBinary(gameId) {
-    const binaryPath = path.join(BINARY_STORAGE_DIR, `${gameId}.dat`);
-    if (!fs.existsSync(binaryPath)) return null;
-    const dataBuffer = fs.readFileSync(binaryPath);
-    return JSON.parse(dataBuffer.toString('utf-8'));
-}
-
-// Delete game binary file
-function deleteGameBinary(gameId) {
-    const binaryPath = path.join(BINARY_STORAGE_DIR, `${gameId}.dat`);
-    if (fs.existsSync(binaryPath)) {
-        fs.unlinkSync(binaryPath);
-        console.log(`🗑️ Binary deleted: ${gameId}.dat`);
-    }
-}
-
-// ==================== ORIGINAL GAME API (PRESERVED & ENHANCED) ====================
-const GAMES_FILE = path.join(__dirname, 'games.json');
-const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
-const INSTALLER_PATH = path.join(DOWNLOADS_DIR, 'TavianSetup.exe');
-
-// Create downloads directory if it doesn't exist
-if (!fs.existsSync(DOWNLOADS_DIR)) {
-    fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
-    console.log('✅ Created downloads directory');
-}
-
-// Initialize games.json if it doesn't exist
-if (!fs.existsSync(GAMES_FILE)) {
-    fs.writeFileSync(GAMES_FILE, JSON.stringify({ 
-        games: [], 
-        nextId: 100000000,
-        publishedAt: new Date().toISOString()
-    }, null, 2));
-    console.log('✅ Created games.json file');
-}
-
-// Helper functions for games
-function readGames() {
-    const data = fs.readFileSync(GAMES_FILE);
-    return JSON.parse(data);
-}
-
-function writeGames(data) {
-    fs.writeFileSync(GAMES_FILE, JSON.stringify(data, null, 2));
-}
-
-function generateGameId() {
-    const games = readGames();
-    let newId = games.nextId || 100000000;
-    games.nextId = newId + 1;
-    writeGames(games);
-    return newId.toString();
-}
-
 // ==================== EXE API ENDPOINTS ====================
 
 // Get all uploaded .exe files
@@ -257,13 +183,48 @@ app.delete('/api/exe/:id', (req, res) => {
     }
 });
 
-// ==================== ENHANCED GAME API ENDPOINTS ====================
+// ==================== ENHANCED GAME STORAGE ====================
+const GAMES_FILE = path.join(__dirname, 'games.json');
+const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
+const INSTALLER_PATH = path.join(DOWNLOADS_DIR, 'TavianSetup.exe');
 
-// Health check
+if (!fs.existsSync(DOWNLOADS_DIR)) {
+    fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+    console.log('✅ Created downloads directory');
+}
+
+if (!fs.existsSync(GAMES_FILE)) {
+    fs.writeFileSync(GAMES_FILE, JSON.stringify({ 
+        games: [], 
+        nextId: 100000000,
+        publishedAt: new Date().toISOString()
+    }, null, 2));
+    console.log('✅ Created games.json file');
+}
+
+function readGames() {
+    const data = fs.readFileSync(GAMES_FILE);
+    return JSON.parse(data);
+}
+
+function writeGames(data) {
+    fs.writeFileSync(GAMES_FILE, JSON.stringify(data, null, 2));
+}
+
+function generateGameId() {
+    const games = readGames();
+    let newId = games.nextId || 100000000;
+    games.nextId = newId + 1;
+    writeGames(games);
+    return newId.toString();
+}
+
+// ==================== GAME API ENDPOINTS ====================
+
 app.get('/', (req, res) => {
     res.json({ 
         status: 'ok', 
-        message: 'Tavian Studio API is running with EXE and Binary support!',
+        message: 'Tavian Studio API is running with EXE support & Enhanced Game Data!',
         endpoints: [
             '📦 EXE Management:',
             '  GET    /api/exe/list     - List all .exe files',
@@ -271,13 +232,11 @@ app.get('/', (req, res) => {
             '  GET    /api/exe/download/:id - Download .exe file',
             '  DELETE /api/exe/:id      - Delete .exe file',
             '',
-            '🎮 Game Management (Enhanced Binary Storage):',
-            '  POST   /api/games/publish - Publish a new game (saves ALL explorer data)',
+            '🎮 Game Management:',
+            '  POST   /api/games/publish - Publish a new game (FULL DATA)',
             '  GET    /api/games        - Get all public games',
-            '  GET    /api/games/:gameId - Get specific game with FULL explorer data',
-            '  GET    /api/games/:gameId/data - Get ONLY the binary game data',
+            '  GET    /api/games/:gameId - Get specific game with FULL DATA',
             '  DELETE /api/games/:gameId - Delete a game',
-            '  GET    /api/games/:gameId/export - Export game as binary download',
             '',
             '📥 Installer:',
             '  GET    /download         - Download Tavian installer',
@@ -295,7 +254,6 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Download Tavian installer
 app.get('/download', (req, res) => {
     try {
         if (!fs.existsSync(INSTALLER_PATH)) {
@@ -312,7 +270,6 @@ app.get('/download', (req, res) => {
     }
 });
 
-// Installer information
 app.get('/api/installer', (req, res) => {
     const exists = fs.existsSync(INSTALLER_PATH);
     res.json({
@@ -324,32 +281,42 @@ app.get('/api/installer', (req, res) => {
     });
 });
 
-// ENHANCED: Publish a new game with ALL explorer data (skybox, movement, grid are NOT saved - only explorer items)
+// ==================== ENHANCED PUBLISH ENDPOINT ====================
 app.post('/api/games/publish', (req, res) => {
     try {
-        console.log('📥 Received publish request');
-        const { gameName, description, genre, subgenre, isPublic, thumbnail, gameData, explorerData } = req.body;
+        console.log('📥 Received publish request with enhanced data');
+        
+        const { 
+            gameName, 
+            description, 
+            genre, 
+            subgenre, 
+            isPublic, 
+            thumbnail, 
+            gameData  // This now contains the FULL explorer data!
+        } = req.body;
         
         // Validation
         if (!gameName || gameName.trim().length === 0) {
             return res.status(400).json({ error: 'Game name is required' });
         }
         
-        if (!gameData && !explorerData) {
+        if (!gameData) {
             return res.status(400).json({ error: 'Game data is required' });
         }
+        
+        // Validate that gameData contains explorer structure
+        if (!gameData.objects || !Array.isArray(gameData.objects)) {
+            return res.status(400).json({ error: 'Invalid game data format - missing objects array' });
+        }
+        
+        console.log(`📊 Game data contains: ${gameData.objects.length} objects in explorer`);
         
         // Generate unique 9+ digit game ID
         const gameId = generateGameId();
         const games = readGames();
         
-        // Extract ONLY explorer items (parts, scripts, folders, spawns) - NO skybox, movement, grid
-        const filteredGameData = explorerData || gameData;
-        
-        // Save to binary storage
-        saveGameBinary(gameId, filteredGameData);
-        
-        // Create game object with minimal metadata
+        // Create enhanced game object with FULL data
         const newGame = {
             id: gameId,
             name: gameName.trim(),
@@ -358,32 +325,40 @@ app.post('/api/games/publish', (req, res) => {
             subgenre: subgenre || '',
             isPublic: isPublic !== false,
             thumbnail: thumbnail || null,
-            hasBinaryData: true,
-            binarySize: fs.statSync(path.join(BINARY_STORAGE_DIR, `${gameId}.dat`)).size,
+            
+            // FULL GAME DATA - everything from explorer!
+            gameData: {
+                version: gameData.version || "1.0",
+                savedAt: gameData.savedAt || new Date().toISOString(),
+                objects: gameData.objects,  // All objects with all properties!
+                workspace: gameData.workspace || null  // Workspace structure if provided
+            },
+            
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
             plays: 0,
             likes: 0,
-            // Extract object count from explorer data
-            objectCount: filteredGameData.objects ? filteredGameData.objects.length : 0
+            downloads: 0
         };
         
         games.games.push(newGame);
         writeGames(games);
         
-        console.log(`✅ Game published: ${gameName} (ID: ${gameId}) with ${newGame.objectCount} objects in binary`);
+        console.log(`✅ Game published: ${gameName} (ID: ${gameId})`);
+        console.log(`   📦 Objects in game: ${gameData.objects.length}`);
+        console.log(`   🖼️ Thumbnail: ${thumbnail ? 'Yes' : 'No'}`);
+        console.log(`   🌐 Public: ${isPublic !== false}`);
         
         res.json({ 
             success: true, 
-            message: 'Game published successfully!',
+            message: 'Game published successfully with full data!',
             gameId: gameId,
             game: {
                 id: gameId,
                 name: gameName,
                 isPublic: isPublic !== false,
                 createdAt: newGame.createdAt,
-                objectCount: newGame.objectCount,
-                binarySize: newGame.binarySize
+                objectCount: gameData.objects.length
             }
         });
         
@@ -393,7 +368,7 @@ app.post('/api/games/publish', (req, res) => {
     }
 });
 
-// Get all public games (metadata only, no binary data)
+// Get all public games (metadata only)
 app.get('/api/games', (req, res) => {
     try {
         const games = readGames();
@@ -409,9 +384,8 @@ app.get('/api/games', (req, res) => {
             createdAt: g.createdAt,
             plays: g.plays,
             likes: g.likes,
-            objectCount: g.objectCount || 0,
-            binarySize: g.binarySize || 0,
-            hasBinaryData: g.hasBinaryData || false
+            downloads: g.downloads || 0,
+            objectCount: g.gameData?.objects?.length || 0
         }));
         
         safeGames.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -424,7 +398,7 @@ app.get('/api/games', (req, res) => {
     }
 });
 
-// Get single game by ID with FULL explorer data (from binary)
+// Get single game by ID with FULL DATA
 app.get('/api/games/:gameId', (req, res) => {
     try {
         const gameId = req.params.gameId;
@@ -439,14 +413,7 @@ app.get('/api/games/:gameId', (req, res) => {
         game.plays = (game.plays || 0) + 1;
         writeGames(games);
         
-        // Load binary data
-        const binaryData = loadGameBinary(gameId);
-        
-        if (!binaryData && game.gameData) {
-            // Fallback to old JSON data if binary doesn't exist
-            console.log(`⚠️ Binary not found for ${gameId}, using JSON fallback`);
-        }
-        
+        // Return FULL game data including all explorer objects
         res.json({
             id: game.id,
             name: game.name,
@@ -455,14 +422,14 @@ app.get('/api/games/:gameId', (req, res) => {
             subgenre: game.subgenre,
             isPublic: game.isPublic,
             thumbnail: game.thumbnail,
-            gameData: binaryData || game.gameData, // Return binary data or fallback
-            explorerData: binaryData, // Separate field for explorer data
+            gameData: game.gameData,  // FULL data with all objects!
             createdAt: game.createdAt,
             plays: game.plays,
             likes: game.likes,
-            objectCount: game.objectCount || 0,
-            binarySize: game.binarySize || 0
+            downloads: game.downloads || 0
         });
+        
+        console.log(`🎮 Game loaded: ${game.name} (ID: ${gameId}) - Objects: ${game.gameData?.objects?.length || 0}`);
         
     } catch (error) {
         console.error('❌ Fetch game error:', error);
@@ -470,64 +437,7 @@ app.get('/api/games/:gameId', (req, res) => {
     }
 });
 
-// NEW: Get ONLY the binary game data (for direct download)
-app.get('/api/games/:gameId/data', (req, res) => {
-    try {
-        const gameId = req.params.gameId;
-        const binaryPath = path.join(BINARY_STORAGE_DIR, `${gameId}.dat`);
-        
-        if (!fs.existsSync(binaryPath)) {
-            return res.status(404).json({ error: 'Binary data not found' });
-        }
-        
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Content-Disposition', `attachment; filename="game_${gameId}.dat"`);
-        res.sendFile(binaryPath);
-        
-    } catch (error) {
-        console.error('❌ Binary download error:', error);
-        res.status(500).json({ error: 'Failed to download binary data' });
-    }
-});
-
-// NEW: Export game as full binary package
-app.get('/api/games/:gameId/export', (req, res) => {
-    try {
-        const gameId = req.params.gameId;
-        const games = readGames();
-        const game = games.games.find(g => g.id === gameId);
-        
-        if (!game) {
-            return res.status(404).json({ error: 'Game not found' });
-        }
-        
-        const binaryData = loadGameBinary(gameId);
-        
-        const exportPackage = {
-            metadata: {
-                id: game.id,
-                name: game.name,
-                description: game.description,
-                genre: game.genre,
-                subgenre: game.subgenre,
-                createdAt: game.createdAt,
-                objectCount: game.objectCount || 0
-            },
-            gameData: binaryData
-        };
-        
-        const exportBuffer = Buffer.from(JSON.stringify(exportPackage), 'utf-8');
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Content-Disposition', `attachment; filename="${game.name.replace(/[^a-z0-9]/gi, '_')}.tavian"`);
-        res.send(exportBuffer);
-        
-    } catch (error) {
-        console.error('❌ Export error:', error);
-        res.status(500).json({ error: 'Failed to export game' });
-    }
-});
-
-// Delete a game (also delete binary)
+// Delete a game
 app.delete('/api/games/:gameId', (req, res) => {
     try {
         const gameId = req.params.gameId;
@@ -541,9 +451,6 @@ app.delete('/api/games/:gameId', (req, res) => {
         const deletedGame = games.games[gameIndex];
         games.games.splice(gameIndex, 1);
         writeGames(games);
-        
-        // Delete binary data
-        deleteGameBinary(gameId);
         
         console.log(`🗑️ Game deleted: ${deletedGame.name} (ID: ${gameId})`);
         
@@ -563,17 +470,7 @@ app.get('/api/stats', (req, res) => {
         const totalGames = games.games.length;
         const publicGames = games.games.filter(g => g.isPublic === true).length;
         const totalPlays = games.games.reduce((sum, g) => sum + (g.plays || 0), 0);
-        const totalObjects = games.games.reduce((sum, g) => sum + (g.objectCount || 0), 0);
-        
-        // Calculate binary storage size
-        let binaryTotalSize = 0;
-        if (fs.existsSync(BINARY_STORAGE_DIR)) {
-            const binaryFiles = fs.readdirSync(BINARY_STORAGE_DIR);
-            binaryTotalSize = binaryFiles.reduce((sum, file) => {
-                const stat = fs.statSync(path.join(BINARY_STORAGE_DIR, file));
-                return sum + stat.size;
-            }, 0);
-        }
+        const totalObjects = games.games.reduce((sum, g) => sum + (g.gameData?.objects?.length || 0), 0);
         
         res.json({ 
             games: { 
@@ -583,19 +480,10 @@ app.get('/api/stats', (req, res) => {
                 totalObjects,
                 lastPublished: games.publishedAt 
             },
-            exeFiles: { 
-                total: exeIndex.files.length, 
-                storagePath: EXE_STORAGE_DIR 
-            },
-            binaryStorage: {
-                totalSizeBytes: binaryTotalSize,
-                totalSizeMB: (binaryTotalSize / 1024 / 1024).toFixed(2),
-                path: BINARY_STORAGE_DIR
-            }
+            exeFiles: { total: exeIndex.files.length, storagePath: EXE_STORAGE_DIR }
         });
         
     } catch (error) {
-        console.error('❌ Stats error:', error);
         res.status(500).json({ error: 'Failed to get stats' });
     }
 });
@@ -604,36 +492,35 @@ app.get('/api/stats', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔═══════════════════════════════════════════════════════════════════╗
-║     🟣 Tavian Studio API Server - ENHANCED BINARY STORAGE        ║
+║     🟣 Tavian Studio API Server - ENHANCED GAME DATA             ║
 ╠═══════════════════════════════════════════════════════════════════╣
 ║  📡 Running on: http://0.0.0.0:${PORT}                            ║
 ║  ✅ CORS enabled                                                  ║
 ║  📦 EXE files stored in: ${EXE_STORAGE_DIR}                      ║
-║  💾 Binary games stored in: ${BINARY_STORAGE_DIR}                ║
-║  🎮 Games metadata stored in: games.json                         ║
+║  🎮 Games stored in: games.json                                   ║
 ╠═══════════════════════════════════════════════════════════════════╣
-║  📌 WHAT GETS SAVED (Explorer Items Only):                       ║
-║  ✅ Parts (position, rotation, scale, color)                     ║
-║  ✅ Scripts (name, code)                                         ║
-║  ✅ Folders (name, hierarchy)                                    ║
-║  ✅ SpawnPoints (position)                                       ║
-║  ✅ Parent-child relationships                                   ║
-║  ✅ Object names and IDs                                         ║
+║  🆕 ENHANCED FEATURES:                                            ║
+║  ✓ Saves ALL explorer objects with ALL properties                ║
+║  ✓ Preserves parent-child relationships                          ║
+║  ✓ Saves transforms (position, rotation, scale)                  ║
+║  ✓ Saves colors, script code, spawn points                       ║
+║  ✓ Does NOT save: skybox, grid, editor camera, movement          ║
 ╠═══════════════════════════════════════════════════════════════════╣
-║  📌 WHAT IS NOT SAVED:                                           ║
-║  ❌ Skybox                                                        ║
-║  ❌ Movement/Camera controls                                     ║
-║  ❌ Grid helper                                                  ║
-║  ❌ Editor UI state                                              ║
+║  📌 EXE ENDPOINTS:                                                ║
+║  GET    /api/exe/list       - List all .exe files                ║
+║  POST   /api/exe/upload     - Upload .exe file                   ║
+║  GET    /api/exe/download/:id - Download .exe                    ║
+║  DELETE /api/exe/:id        - Delete .exe file                   ║
 ╠═══════════════════════════════════════════════════════════════════╣
-║  🎮 ENHANCED GAME ENDPOINTS:                                     ║
-║  POST   /api/games/publish     - Save ALL explorer data         ║
-║  GET    /api/games             - List all public games          ║
-║  GET    /api/games/:id         - Get FULL explorer data         ║
-║  GET    /api/games/:id/data    - Download raw binary            ║
-║  GET    /api/games/:id/export  - Export as .tavian package      ║
-║  DELETE /api/games/:id         - Delete game                    ║
-║  GET    /api/stats             - Get statistics                 ║
+║  🎮 GAME ENDPOINTS:                                               ║
+║  POST   /api/games/publish  - Publish game (FULL DATA)           ║
+║  GET    /api/games          - List public games (metadata)       ║
+║  GET    /api/games/:id      - Get game with FULL DATA            ║
+║  DELETE /api/games/:id      - Delete game                        ║
+║  GET    /api/stats          - Get statistics                     ║
+║  GET    /api/installer      - Get installer info                 ║
+║  GET    /download           - Download installer                 ║
+║  GET    /api/health         - Health check                       ║
 ╚═══════════════════════════════════════════════════════════════════╝
     `);
 });
