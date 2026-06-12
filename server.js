@@ -16,9 +16,11 @@ app.use(cors({
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// ==================== EXE FILE STORAGE SYSTEM ====================
+// ==================== FILE STORAGE SYSTEMS ====================
 const EXE_STORAGE_DIR = path.join(__dirname, 'exe_files');
+const GLTF_STORAGE_DIR = path.join(__dirname, 'gltf_files');
 const EXE_INDEX_FILE = path.join(__dirname, 'exe_index.json');
+const GLTF_INDEX_FILE = path.join(__dirname, 'gltf_index.json');
 
 // Create directories and files if they don't exist
 if (!fs.existsSync(EXE_STORAGE_DIR)) {
@@ -26,25 +28,60 @@ if (!fs.existsSync(EXE_STORAGE_DIR)) {
     console.log('✅ Created exe_files directory');
 }
 
+if (!fs.existsSync(GLTF_STORAGE_DIR)) {
+    fs.mkdirSync(GLTF_STORAGE_DIR, { recursive: true });
+    console.log('✅ Created gltf_files directory');
+}
+
 if (!fs.existsSync(EXE_INDEX_FILE)) {
     fs.writeFileSync(EXE_INDEX_FILE, JSON.stringify({ files: [], nextId: 1 }, null, 2));
     console.log('✅ Created exe_index.json');
 }
 
-// Multer configuration for .exe file uploads
-const storage = multer.diskStorage({
+if (!fs.existsSync(GLTF_INDEX_FILE)) {
+    fs.writeFileSync(GLTF_INDEX_FILE, JSON.stringify({ files: [], nextId: 1 }, null, 2));
+    console.log('✅ Created gltf_index.json');
+}
+
+// Multer configurations
+const exeStorage = multer.diskStorage({
     destination: (req, file, cb) => {
         cb(null, EXE_STORAGE_DIR);
     },
     filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, uniqueSuffix + path.extname(file.originalname));
+        cb(null, uniqueSuffix + '.exe');
     }
 });
 
-const upload = multer({ 
-    storage: storage, 
+const gltfStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, GLTF_STORAGE_DIR);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const ext = path.extname(file.originalname).toLowerCase();
+        cb(null, uniqueSuffix + ext);
+    }
+});
+
+const uploadEXE = multer({ 
+    storage: exeStorage, 
     limits: { fileSize: 500 * 1024 * 1024 } // 500MB limit
+});
+
+const uploadGLTF = multer({ 
+    storage: gltfStorage, 
+    limits: { fileSize: 500 * 1024 * 1024 }, // 500MB limit
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = ['.gltf', '.glb', '.obj', '.fbx', '.mtl'];
+        const ext = path.extname(file.originalname).toLowerCase();
+        if (allowedTypes.includes(ext)) {
+            cb(null, true);
+        } else {
+            cb(new Error('Invalid file type. Only GLTF, GLB, OBJ, FBX, and MTL files are allowed'));
+        }
+    }
 });
 
 // Helper functions for EXE index
@@ -60,6 +97,21 @@ function readExeIndex() {
 
 function writeExeIndex(data) {
     fs.writeFileSync(EXE_INDEX_FILE, JSON.stringify(data, null, 2));
+}
+
+// Helper functions for GLTF index
+function readGltfIndex() {
+    try {
+        const data = fs.readFileSync(GLTF_INDEX_FILE);
+        return JSON.parse(data);
+    } catch (error) {
+        console.error('Error reading gltf index:', error);
+        return { files: [], nextId: 1 };
+    }
+}
+
+function writeGltfIndex(data) {
+    fs.writeFileSync(GLTF_INDEX_FILE, JSON.stringify(data, null, 2));
 }
 
 // ==================== EXE API ENDPOINTS ====================
@@ -82,7 +134,7 @@ app.get('/api/exe/list', (req, res) => {
 });
 
 // Upload a new .exe file
-app.post('/api/exe/upload', upload.single('exeFile'), (req, res) => {
+app.post('/api/exe/upload', uploadEXE.single('exeFile'), (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: 'No .exe file provided' });
@@ -183,6 +235,132 @@ app.delete('/api/exe/:id', (req, res) => {
     }
 });
 
+// ==================== GLTF/3D MODEL API ENDPOINTS ====================
+
+// Get all uploaded 3D models
+app.get('/api/gltf/list', (req, res) => {
+    try {
+        const index = readGltfIndex();
+        const files = index.files.map(f => ({
+            id: f.id,
+            name: f.originalName,
+            type: f.fileType,
+            size: f.size,
+            uploadedAt: f.uploadedAt
+        }));
+        res.json(files);
+    } catch (error) {
+        console.error('❌ Error listing 3D models:', error);
+        res.status(500).json({ error: 'Failed to list models: ' + error.message });
+    }
+});
+
+// Upload a new 3D model (GLTF, GLB, OBJ)
+app.post('/api/gltf/upload', uploadGLTF.single('modelFile'), (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No model file provided' });
+        }
+
+        const originalName = req.body.name || req.file.originalname;
+        const fileExt = path.extname(originalName).toLowerCase();
+        
+        // Validate file type
+        const allowedExt = ['.gltf', '.glb', '.obj', '.fbx', '.mtl'];
+        if (!allowedExt.includes(fileExt)) {
+            fs.unlinkSync(req.file.path);
+            return res.status(400).json({ error: 'Invalid file type. Allowed: GLTF, GLB, OBJ, FBX, MTL' });
+        }
+
+        const index = readGltfIndex();
+        const newId = index.nextId || 1;
+        
+        const newEntry = {
+            id: newId,
+            originalName: originalName,
+            storedFilename: req.file.filename,
+            fileType: fileExt.substring(1).toUpperCase(),
+            size: req.file.size,
+            uploadedAt: new Date().toISOString()
+        };
+        
+        index.files.push(newEntry);
+        index.nextId = newId + 1;
+        writeGltfIndex(index);
+        
+        console.log(`✅ 3D Model uploaded: ${originalName} (ID: ${newId}, Type: ${newEntry.fileType}, Size: ${req.file.size} bytes)`);
+        
+        res.json({ 
+            success: true, 
+            id: newId, 
+            name: originalName,
+            type: newEntry.fileType,
+            size: req.file.size,
+            message: '3D model uploaded successfully'
+        });
+        
+    } catch (error) {
+        console.error('❌ Upload error:', error);
+        res.status(500).json({ error: 'Failed to upload model: ' + error.message });
+    }
+});
+
+// Download a 3D model by ID
+app.get('/api/gltf/download/:id', (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const index = readGltfIndex();
+        const entry = index.files.find(f => f.id === id);
+        
+        if (!entry) {
+            return res.status(404).json({ error: 'Model not found' });
+        }
+        
+        const filePath = path.join(GLTF_STORAGE_DIR, entry.storedFilename);
+        
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'Model file missing on server' });
+        }
+        
+        res.download(filePath, entry.originalName);
+        console.log(`📥 Download: ${entry.originalName} (${entry.fileType})`);
+        
+    } catch (error) {
+        console.error('❌ Download error:', error);
+        res.status(500).json({ error: 'Failed to download model' });
+    }
+});
+
+// Delete a 3D model by ID
+app.delete('/api/gltf/:id', (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const index = readGltfIndex();
+        const fileIndex = index.files.findIndex(f => f.id === id);
+        
+        if (fileIndex === -1) {
+            return res.status(404).json({ error: 'Model not found' });
+        }
+        
+        const entry = index.files[fileIndex];
+        const filePath = path.join(GLTF_STORAGE_DIR, entry.storedFilename);
+        
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+        }
+        
+        index.files.splice(fileIndex, 1);
+        writeGltfIndex(index);
+        
+        console.log(`🗑️ Deleted 3D Model: ${entry.originalName} (ID: ${id})`);
+        res.json({ success: true, message: 'Model deleted successfully' });
+        
+    } catch (error) {
+        console.error('❌ Delete error:', error);
+        res.status(500).json({ error: 'Failed to delete model' });
+    }
+});
+
 // ==================== ENHANCED GAME STORAGE ====================
 const GAMES_FILE = path.join(__dirname, 'games.json');
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
@@ -224,13 +402,19 @@ function generateGameId() {
 app.get('/', (req, res) => {
     res.json({ 
         status: 'ok', 
-        message: 'Tavian Studio API is running with EXE support & Enhanced Game Data!',
+        message: 'Tavian Studio API is running with GLTF/GLB Support!',
         endpoints: [
             '📦 EXE Management:',
             '  GET    /api/exe/list     - List all .exe files',
             '  POST   /api/exe/upload   - Upload .exe file',
             '  GET    /api/exe/download/:id - Download .exe file',
             '  DELETE /api/exe/:id      - Delete .exe file',
+            '',
+            '🎨 3D Model Management (GLTF/GLB/OBJ):',
+            '  GET    /api/gltf/list    - List all 3D models',
+            '  POST   /api/gltf/upload  - Upload 3D model',
+            '  GET    /api/gltf/download/:id - Download 3D model',
+            '  DELETE /api/gltf/:id     - Delete 3D model',
             '',
             '🎮 Game Management:',
             '  POST   /api/games/publish - Publish a new game (FULL DATA)',
@@ -293,7 +477,7 @@ app.post('/api/games/publish', (req, res) => {
             subgenre, 
             isPublic, 
             thumbnail, 
-            gameData  // This now contains the FULL explorer data!
+            gameData
         } = req.body;
         
         // Validation
@@ -331,7 +515,7 @@ app.post('/api/games/publish', (req, res) => {
                 version: gameData.version || "1.0",
                 savedAt: gameData.savedAt || new Date().toISOString(),
                 objects: gameData.objects,  // All objects with all properties!
-                workspace: gameData.workspace || null  // Workspace structure if provided
+                workspace: gameData.workspace || null
             },
             
             createdAt: new Date().toISOString(),
@@ -467,6 +651,7 @@ app.get('/api/stats', (req, res) => {
     try {
         const games = readGames();
         const exeIndex = readExeIndex();
+        const gltfIndex = readGltfIndex();
         const totalGames = games.games.length;
         const publicGames = games.games.filter(g => g.isPublic === true).length;
         const totalPlays = games.games.reduce((sum, g) => sum + (g.plays || 0), 0);
@@ -480,10 +665,12 @@ app.get('/api/stats', (req, res) => {
                 totalObjects,
                 lastPublished: games.publishedAt 
             },
-            exeFiles: { total: exeIndex.files.length, storagePath: EXE_STORAGE_DIR }
+            exeFiles: { total: exeIndex.files.length, storagePath: EXE_STORAGE_DIR },
+            gltfFiles: { total: gltfIndex.files.length, storagePath: GLTF_STORAGE_DIR }
         });
         
     } catch (error) {
+        console.error('❌ Stats error:', error);
         res.status(500).json({ error: 'Failed to get stats' });
     }
 });
@@ -492,25 +679,31 @@ app.get('/api/stats', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔═══════════════════════════════════════════════════════════════════╗
-║     🟣 Tavian Studio API Server - ENHANCED GAME DATA             ║
+║     🟣 Tavian Studio API Server - FULL 3D MODEL SUPPORT          ║
 ╠═══════════════════════════════════════════════════════════════════╣
 ║  📡 Running on: http://0.0.0.0:${PORT}                            ║
 ║  ✅ CORS enabled                                                  ║
 ║  📦 EXE files stored in: ${EXE_STORAGE_DIR}                      ║
+║  🎨 GLTF/GLB files stored in: ${GLTF_STORAGE_DIR}                ║
 ║  🎮 Games stored in: games.json                                   ║
 ╠═══════════════════════════════════════════════════════════════════╣
-║  🆕 ENHANCED FEATURES:                                            ║
-║  ✓ Saves ALL explorer objects with ALL properties                ║
-║  ✓ Preserves parent-child relationships                          ║
-║  ✓ Saves transforms (position, rotation, scale)                  ║
-║  ✓ Saves colors, script code, spawn points                       ║
-║  ✓ Does NOT save: skybox, grid, editor camera, movement          ║
+║  🆕 NEW FEATURES:                                                 ║
+║  ✓ Full GLTF/GLB/OBJ upload support                              ║
+║  ✓ Proper file validation for 3D models                          ║
+║  ✓ Separate storage for models and executables                   ║
+║  ✓ File type detection and tracking                              ║
 ╠═══════════════════════════════════════════════════════════════════╣
 ║  📌 EXE ENDPOINTS:                                                ║
 ║  GET    /api/exe/list       - List all .exe files                ║
 ║  POST   /api/exe/upload     - Upload .exe file                   ║
 ║  GET    /api/exe/download/:id - Download .exe                    ║
 ║  DELETE /api/exe/:id        - Delete .exe file                   ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  🎨 3D MODEL ENDPOINTS:                                           ║
+║  GET    /api/gltf/list      - List all 3D models                 ║
+║  POST   /api/gltf/upload    - Upload GLTF/GLB/OBJ                ║
+║  GET    /api/gltf/download/:id - Download model                  ║
+║  DELETE /api/gltf/:id       - Delete model                       ║
 ╠═══════════════════════════════════════════════════════════════════╣
 ║  🎮 GAME ENDPOINTS:                                               ║
 ║  POST   /api/games/publish  - Publish game (FULL DATA)           ║
