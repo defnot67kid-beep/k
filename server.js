@@ -23,25 +23,29 @@ const EXE_INDEX_FILE = path.join(__dirname, 'exe_index.json');
 const GLTF_INDEX_FILE = path.join(__dirname, 'gltf_index.json');
 
 // Create directories and files if they don't exist
-if (!fs.existsSync(EXE_STORAGE_DIR)) {
-    fs.mkdirSync(EXE_STORAGE_DIR, { recursive: true });
-    console.log('✅ Created exe_files directory');
+function ensureDirectories() {
+    if (!fs.existsSync(EXE_STORAGE_DIR)) {
+        fs.mkdirSync(EXE_STORAGE_DIR, { recursive: true });
+        console.log('✅ Created exe_files directory');
+    }
+    
+    if (!fs.existsSync(GLTF_STORAGE_DIR)) {
+        fs.mkdirSync(GLTF_STORAGE_DIR, { recursive: true });
+        console.log('✅ Created gltf_files directory');
+    }
+    
+    if (!fs.existsSync(EXE_INDEX_FILE)) {
+        fs.writeFileSync(EXE_INDEX_FILE, JSON.stringify({ files: [], nextId: 1 }, null, 2));
+        console.log('✅ Created exe_index.json');
+    }
+    
+    if (!fs.existsSync(GLTF_INDEX_FILE)) {
+        fs.writeFileSync(GLTF_INDEX_FILE, JSON.stringify({ files: [], nextId: 1 }, null, 2));
+        console.log('✅ Created gltf_index.json');
+    }
 }
 
-if (!fs.existsSync(GLTF_STORAGE_DIR)) {
-    fs.mkdirSync(GLTF_STORAGE_DIR, { recursive: true });
-    console.log('✅ Created gltf_files directory');
-}
-
-if (!fs.existsSync(EXE_INDEX_FILE)) {
-    fs.writeFileSync(EXE_INDEX_FILE, JSON.stringify({ files: [], nextId: 1 }, null, 2));
-    console.log('✅ Created exe_index.json');
-}
-
-if (!fs.existsSync(GLTF_INDEX_FILE)) {
-    fs.writeFileSync(GLTF_INDEX_FILE, JSON.stringify({ files: [], nextId: 1 }, null, 2));
-    console.log('✅ Created gltf_index.json');
-}
+ensureDirectories();
 
 // Multer configurations
 const exeStorage = multer.diskStorage({
@@ -72,7 +76,7 @@ const uploadEXE = multer({
 
 const uploadGLTF = multer({ 
     storage: gltfStorage, 
-    limits: { fileSize: 500 * 1024 * 1024 }, // 500MB limit
+    limits: { fileSize: 500 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
         const allowedTypes = ['.gltf', '.glb', '.obj', '.fbx', '.mtl'];
         const ext = path.extname(file.originalname).toLowerCase();
@@ -142,7 +146,6 @@ app.post('/api/exe/upload', uploadEXE.single('exeFile'), (req, res) => {
 
         const originalName = req.body.name || req.file.originalname;
         
-        // Validate it's an .exe file
         if (!originalName.toLowerCase().endsWith('.exe') && !req.file.originalname.toLowerCase().endsWith('.exe')) {
             fs.unlinkSync(req.file.path);
             return res.status(400).json({ error: 'Only .exe files are allowed' });
@@ -240,6 +243,7 @@ app.delete('/api/exe/:id', (req, res) => {
 // Get all uploaded 3D models
 app.get('/api/gltf/list', (req, res) => {
     try {
+        console.log('📋 Fetching GLTF list...');
         const index = readGltfIndex();
         const files = index.files.map(f => ({
             id: f.id,
@@ -248,7 +252,8 @@ app.get('/api/gltf/list', (req, res) => {
             size: f.size,
             uploadedAt: f.uploadedAt
         }));
-        res.json(files);
+        console.log(`✅ Found ${files.length} 3D models`);
+        res.json({ success: true, files: files });
     } catch (error) {
         console.error('❌ Error listing 3D models:', error);
         res.status(500).json({ error: 'Failed to list models: ' + error.message });
@@ -258,6 +263,8 @@ app.get('/api/gltf/list', (req, res) => {
 // Upload a new 3D model (GLTF, GLB, OBJ)
 app.post('/api/gltf/upload', uploadGLTF.single('modelFile'), (req, res) => {
     try {
+        console.log('📤 Received GLTF upload request');
+        
         if (!req.file) {
             return res.status(400).json({ error: 'No model file provided' });
         }
@@ -309,6 +316,8 @@ app.post('/api/gltf/upload', uploadGLTF.single('modelFile'), (req, res) => {
 app.get('/api/gltf/download/:id', (req, res) => {
     try {
         const id = parseInt(req.params.id);
+        console.log(`📥 Download request for model ID: ${id}`);
+        
         const index = readGltfIndex();
         const entry = index.files.find(f => f.id === id);
         
@@ -335,6 +344,8 @@ app.get('/api/gltf/download/:id', (req, res) => {
 app.delete('/api/gltf/:id', (req, res) => {
     try {
         const id = parseInt(req.params.id);
+        console.log(`🗑️ Delete request for model ID: ${id}`);
+        
         const index = readGltfIndex();
         const fileIndex = index.files.findIndex(f => f.id === id);
         
@@ -403,33 +414,32 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'ok', 
         message: 'Tavian Studio API is running with GLTF/GLB Support!',
-        endpoints: [
-            '📦 EXE Management:',
-            '  GET    /api/exe/list     - List all .exe files',
-            '  POST   /api/exe/upload   - Upload .exe file',
-            '  GET    /api/exe/download/:id - Download .exe file',
-            '  DELETE /api/exe/:id      - Delete .exe file',
-            '',
-            '🎨 3D Model Management (GLTF/GLB/OBJ):',
-            '  GET    /api/gltf/list    - List all 3D models',
-            '  POST   /api/gltf/upload  - Upload 3D model',
-            '  GET    /api/gltf/download/:id - Download 3D model',
-            '  DELETE /api/gltf/:id     - Delete 3D model',
-            '',
-            '🎮 Game Management:',
-            '  POST   /api/games/publish - Publish a new game (FULL DATA)',
-            '  GET    /api/games        - Get all public games',
-            '  GET    /api/games/:gameId - Get specific game with FULL DATA',
-            '  DELETE /api/games/:gameId - Delete a game',
-            '',
-            '📥 Installer:',
-            '  GET    /download         - Download Tavian installer',
-            '  GET    /api/installer    - Get installer info',
-            '',
-            '🔧 Utilities:',
-            '  GET    /api/health       - Health check',
-            '  GET    /api/stats        - Get statistics'
-        ],
+        endpoints: {
+            exe: {
+                list: 'GET /api/exe/list',
+                upload: 'POST /api/exe/upload',
+                download: 'GET /api/exe/download/:id',
+                delete: 'DELETE /api/exe/:id'
+            },
+            gltf: {
+                list: 'GET /api/gltf/list',
+                upload: 'POST /api/gltf/upload',
+                download: 'GET /api/gltf/download/:id',
+                delete: 'DELETE /api/gltf/:id'
+            },
+            games: {
+                publish: 'POST /api/games/publish',
+                list: 'GET /api/games',
+                get: 'GET /api/games/:gameId',
+                delete: 'DELETE /api/games/:gameId'
+            },
+            other: {
+                download: 'GET /download',
+                installer: 'GET /api/installer',
+                stats: 'GET /api/stats',
+                health: 'GET /api/health'
+            }
+        },
         timestamp: new Date().toISOString()
     });
 });
@@ -468,7 +478,7 @@ app.get('/api/installer', (req, res) => {
 // ==================== ENHANCED PUBLISH ENDPOINT ====================
 app.post('/api/games/publish', (req, res) => {
     try {
-        console.log('📥 Received publish request with enhanced data');
+        console.log('📥 Received publish request');
         
         const { 
             gameName, 
@@ -480,7 +490,6 @@ app.post('/api/games/publish', (req, res) => {
             gameData
         } = req.body;
         
-        // Validation
         if (!gameName || gameName.trim().length === 0) {
             return res.status(400).json({ error: 'Game name is required' });
         }
@@ -489,18 +498,15 @@ app.post('/api/games/publish', (req, res) => {
             return res.status(400).json({ error: 'Game data is required' });
         }
         
-        // Validate that gameData contains explorer structure
         if (!gameData.objects || !Array.isArray(gameData.objects)) {
             return res.status(400).json({ error: 'Invalid game data format - missing objects array' });
         }
         
-        console.log(`📊 Game data contains: ${gameData.objects.length} objects in explorer`);
+        console.log(`📊 Game data contains: ${gameData.objects.length} objects`);
         
-        // Generate unique 9+ digit game ID
         const gameId = generateGameId();
         const games = readGames();
         
-        // Create enhanced game object with FULL data
         const newGame = {
             id: gameId,
             name: gameName.trim(),
@@ -509,15 +515,12 @@ app.post('/api/games/publish', (req, res) => {
             subgenre: subgenre || '',
             isPublic: isPublic !== false,
             thumbnail: thumbnail || null,
-            
-            // FULL GAME DATA - everything from explorer!
             gameData: {
                 version: gameData.version || "1.0",
                 savedAt: gameData.savedAt || new Date().toISOString(),
-                objects: gameData.objects,  // All objects with all properties!
+                objects: gameData.objects,
                 workspace: gameData.workspace || null
             },
-            
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
             plays: 0,
@@ -529,13 +532,12 @@ app.post('/api/games/publish', (req, res) => {
         writeGames(games);
         
         console.log(`✅ Game published: ${gameName} (ID: ${gameId})`);
-        console.log(`   📦 Objects in game: ${gameData.objects.length}`);
+        console.log(`   📦 Objects: ${gameData.objects.length}`);
         console.log(`   🖼️ Thumbnail: ${thumbnail ? 'Yes' : 'No'}`);
-        console.log(`   🌐 Public: ${isPublic !== false}`);
         
         res.json({ 
             success: true, 
-            message: 'Game published successfully with full data!',
+            message: 'Game published successfully!',
             gameId: gameId,
             game: {
                 id: gameId,
@@ -552,7 +554,7 @@ app.post('/api/games/publish', (req, res) => {
     }
 });
 
-// Get all public games (metadata only)
+// Get all public games
 app.get('/api/games', (req, res) => {
     try {
         const games = readGames();
@@ -582,7 +584,7 @@ app.get('/api/games', (req, res) => {
     }
 });
 
-// Get single game by ID with FULL DATA
+// Get single game by ID
 app.get('/api/games/:gameId', (req, res) => {
     try {
         const gameId = req.params.gameId;
@@ -593,11 +595,9 @@ app.get('/api/games/:gameId', (req, res) => {
             return res.status(404).json({ error: 'Game not found' });
         }
         
-        // Increment play count
         game.plays = (game.plays || 0) + 1;
         writeGames(games);
         
-        // Return FULL game data including all explorer objects
         res.json({
             id: game.id,
             name: game.name,
@@ -606,7 +606,7 @@ app.get('/api/games/:gameId', (req, res) => {
             subgenre: game.subgenre,
             isPublic: game.isPublic,
             thumbnail: game.thumbnail,
-            gameData: game.gameData,  // FULL data with all objects!
+            gameData: game.gameData,
             createdAt: game.createdAt,
             plays: game.plays,
             likes: game.likes,
@@ -652,21 +652,16 @@ app.get('/api/stats', (req, res) => {
         const games = readGames();
         const exeIndex = readExeIndex();
         const gltfIndex = readGltfIndex();
-        const totalGames = games.games.length;
-        const publicGames = games.games.filter(g => g.isPublic === true).length;
-        const totalPlays = games.games.reduce((sum, g) => sum + (g.plays || 0), 0);
-        const totalObjects = games.games.reduce((sum, g) => sum + (g.gameData?.objects?.length || 0), 0);
         
         res.json({ 
             games: { 
-                totalGames, 
-                publicGames, 
-                totalPlays, 
-                totalObjects,
-                lastPublished: games.publishedAt 
+                total: games.games.length,
+                public: games.games.filter(g => g.isPublic === true).length,
+                plays: games.games.reduce((sum, g) => sum + (g.plays || 0), 0),
+                objects: games.games.reduce((sum, g) => sum + (g.gameData?.objects?.length || 0), 0)
             },
-            exeFiles: { total: exeIndex.files.length, storagePath: EXE_STORAGE_DIR },
-            gltfFiles: { total: gltfIndex.files.length, storagePath: GLTF_STORAGE_DIR }
+            exeFiles: { total: exeIndex.files.length },
+            gltfFiles: { total: gltfIndex.files.length }
         });
         
     } catch (error) {
@@ -679,41 +674,35 @@ app.get('/api/stats', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔═══════════════════════════════════════════════════════════════════╗
-║     🟣 Tavian Studio API Server - FULL 3D MODEL SUPPORT          ║
+║     🟣 Tavian Studio API Server - FULLY FIXED                    ║
 ╠═══════════════════════════════════════════════════════════════════╣
 ║  📡 Running on: http://0.0.0.0:${PORT}                            ║
+║  🌐 Public URL: https://tavian-api.onrender.com                  ║
 ║  ✅ CORS enabled                                                  ║
-║  📦 EXE files stored in: ${EXE_STORAGE_DIR}                      ║
-║  🎨 GLTF/GLB files stored in: ${GLTF_STORAGE_DIR}                ║
-║  🎮 Games stored in: games.json                                   ║
 ╠═══════════════════════════════════════════════════════════════════╣
-║  🆕 NEW FEATURES:                                                 ║
-║  ✓ Full GLTF/GLB/OBJ upload support                              ║
-║  ✓ Proper file validation for 3D models                          ║
-║  ✓ Separate storage for models and executables                   ║
-║  ✓ File type detection and tracking                              ║
+║  🎨 TEST YOUR ENDPOINTS:                                          ║
+║  📋 GLTF List: GET /api/gltf/list                                ║
+║  📤 GLTF Upload: POST /api/gltf/upload                           ║
+║  📥 GLTF Download: GET /api/gltf/download/:id                    ║
+║  🗑️ GLTF Delete: DELETE /api/gltf/:id                            ║
 ╠═══════════════════════════════════════════════════════════════════╣
-║  📌 EXE ENDPOINTS:                                                ║
-║  GET    /api/exe/list       - List all .exe files                ║
-║  POST   /api/exe/upload     - Upload .exe file                   ║
-║  GET    /api/exe/download/:id - Download .exe                    ║
-║  DELETE /api/exe/:id        - Delete .exe file                   ║
-╠═══════════════════════════════════════════════════════════════════╣
-║  🎨 3D MODEL ENDPOINTS:                                           ║
-║  GET    /api/gltf/list      - List all 3D models                 ║
-║  POST   /api/gltf/upload    - Upload GLTF/GLB/OBJ                ║
-║  GET    /api/gltf/download/:id - Download model                  ║
-║  DELETE /api/gltf/:id       - Delete model                       ║
+║  📦 EXE ENDPOINTS:                                                ║
+║  GET    /api/exe/list                                            ║
+║  POST   /api/exe/upload                                          ║
+║  GET    /api/exe/download/:id                                    ║
+║  DELETE /api/exe/:id                                             ║
 ╠═══════════════════════════════════════════════════════════════════╣
 ║  🎮 GAME ENDPOINTS:                                               ║
-║  POST   /api/games/publish  - Publish game (FULL DATA)           ║
-║  GET    /api/games          - List public games (metadata)       ║
-║  GET    /api/games/:id      - Get game with FULL DATA            ║
-║  DELETE /api/games/:id      - Delete game                        ║
-║  GET    /api/stats          - Get statistics                     ║
-║  GET    /api/installer      - Get installer info                 ║
-║  GET    /download           - Download installer                 ║
-║  GET    /api/health         - Health check                       ║
+║  POST   /api/games/publish                                       ║
+║  GET    /api/games                                               ║
+║  GET    /api/games/:id                                           ║
+║  DELETE /api/games/:id                                           ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  🔧 OTHER:                                                        ║
+║  GET    /api/health                                              ║
+║  GET    /api/stats                                               ║
+║  GET    /download                                                ║
+║  GET    /api/installer                                           ║
 ╚═══════════════════════════════════════════════════════════════════╝
     `);
 });
