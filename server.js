@@ -10,13 +10,28 @@ const vm = require('vm');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Create HTTP server for Socket.IO
+// ==================== FIX 1: Use /tmp for Render.com persistent writable storage ====================
+const USE_TMP = process.env.RENDER === 'true' || process.env.NODE_ENV === 'production';
+const BASE_STORAGE = USE_TMP ? '/tmp/tavian_storage' : __dirname;
+
+// Create storage directories with proper paths
+const EXE_STORAGE_DIR = path.join(BASE_STORAGE, 'exe_files');
+const GLTF_STORAGE_DIR = path.join(BASE_STORAGE, 'gltf_files');
+const EXE_INDEX_FILE = path.join(BASE_STORAGE, 'exe_index.json');
+const GLTF_INDEX_FILE = path.join(BASE_STORAGE, 'gltf_index.json');
+const GAMES_FILE = path.join(BASE_STORAGE, 'games.json');
+const DOWNLOADS_DIR = path.join(BASE_STORAGE, 'downloads');
+const INSTALLER_PATH = path.join(DOWNLOADS_DIR, 'TavianSetup.exe');
+
+// Create HTTP server for Socket.IO with better transport
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
         origin: "*",
         methods: ["GET", "POST"]
-    }
+    },
+    transports: ['websocket', 'polling'],
+    allowEIO3: true
 });
 
 // ==================== MIDDLEWARE ====================
@@ -28,23 +43,42 @@ app.use(cors({
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// ==================== FILE STORAGE SYSTEMS ====================
-const EXE_STORAGE_DIR = path.join(__dirname, 'exe_files');
-const GLTF_STORAGE_DIR = path.join(__dirname, 'gltf_files');
-const EXE_INDEX_FILE = path.join(__dirname, 'exe_index.json');
-const GLTF_INDEX_FILE = path.join(__dirname, 'gltf_index.json');
-
-// Create directories and files if they don't exist
+// ==================== FIX 2: Ensure directories exist with error handling ====================
 function ensureDirectories() {
-    if (!fs.existsSync(EXE_STORAGE_DIR)) fs.mkdirSync(EXE_STORAGE_DIR, { recursive: true });
-    if (!fs.existsSync(GLTF_STORAGE_DIR)) fs.mkdirSync(GLTF_STORAGE_DIR, { recursive: true });
-    if (!fs.existsSync(EXE_INDEX_FILE)) fs.writeFileSync(EXE_INDEX_FILE, JSON.stringify({ files: [], nextId: 1 }, null, 2));
-    if (!fs.existsSync(GLTF_INDEX_FILE)) fs.writeFileSync(GLTF_INDEX_FILE, JSON.stringify({ files: [], nextId: 1 }, null, 2));
+    const dirs = [EXE_STORAGE_DIR, GLTF_STORAGE_DIR, DOWNLOADS_DIR];
+    for (const dir of dirs) {
+        if (!fs.existsSync(dir)) {
+            try {
+                fs.mkdirSync(dir, { recursive: true });
+                console.log(`📁 Created directory: ${dir}`);
+            } catch (err) {
+                console.error(`Failed to create ${dir}:`, err.message);
+            }
+        }
+    }
+    
+    // Initialize JSON files if they don't exist
+    const files = [
+        { path: EXE_INDEX_FILE, default: { files: [], nextId: 1 } },
+        { path: GLTF_INDEX_FILE, default: { files: [], nextId: 1 } },
+        { path: GAMES_FILE, default: { games: [], nextId: 100000000 } }
+    ];
+    
+    for (const file of files) {
+        if (!fs.existsSync(file.path)) {
+            try {
+                fs.writeFileSync(file.path, JSON.stringify(file.default, null, 2));
+                console.log(`📄 Created file: ${file.path}`);
+            } catch (err) {
+                console.error(`Failed to create ${file.path}:`, err.message);
+            }
+        }
+    }
 }
 
 ensureDirectories();
 
-// Multer configurations
+// Multer configurations with error handling
 const exeStorage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, EXE_STORAGE_DIR),
     filename: (req, file, cb) => cb(null, Date.now() + '-' + Math.round(Math.random() * 1E9) + '.exe')
@@ -69,11 +103,56 @@ const uploadGLTF = multer({
     }
 });
 
-// Helper functions for index files
-function readExeIndex() { return JSON.parse(fs.readFileSync(EXE_INDEX_FILE)); }
-function writeExeIndex(data) { fs.writeFileSync(EXE_INDEX_FILE, JSON.stringify(data, null, 2)); }
-function readGltfIndex() { return JSON.parse(fs.readFileSync(GLTF_INDEX_FILE)); }
-function writeGltfIndex(data) { fs.writeFileSync(GLTF_INDEX_FILE, JSON.stringify(data, null, 2)); }
+// Helper functions with error handling
+function readExeIndex() { 
+    try {
+        return JSON.parse(fs.readFileSync(EXE_INDEX_FILE)); 
+    } catch (e) {
+        return { files: [], nextId: 1 };
+    }
+}
+function writeExeIndex(data) { 
+    try {
+        fs.writeFileSync(EXE_INDEX_FILE, JSON.stringify(data, null, 2)); 
+    } catch (e) {
+        console.error('Failed to write exe index:', e.message);
+    }
+}
+function readGltfIndex() { 
+    try {
+        return JSON.parse(fs.readFileSync(GLTF_INDEX_FILE)); 
+    } catch (e) {
+        return { files: [], nextId: 1 };
+    }
+}
+function writeGltfIndex(data) { 
+    try {
+        fs.writeFileSync(GLTF_INDEX_FILE, JSON.stringify(data, null, 2)); 
+    } catch (e) {
+        console.error('Failed to write gltf index:', e.message);
+    }
+}
+function readGames() { 
+    try {
+        return JSON.parse(fs.readFileSync(GAMES_FILE)); 
+    } catch (e) {
+        return { games: [], nextId: 100000000 };
+    }
+}
+function writeGames(data) { 
+    try {
+        fs.writeFileSync(GAMES_FILE, JSON.stringify(data, null, 2)); 
+    } catch (e) {
+        console.error('Failed to write games:', e.message);
+    }
+}
+function generateGameId() {
+    const games = readGames();
+    let newId = games.nextId || 100000000;
+    games.nextId = newId + 1;
+    writeGames(games);
+    return newId.toString();
+}
 
 // ==================== PURE SCRIPT EXECUTION ENGINE ====================
 
@@ -121,18 +200,15 @@ class ModuleResolver {
     }
     
     require(moduleName, searchPath = null) {
-        // Check cache first
         if (this.loadedModules.has(moduleName)) {
             return this.loadedModules.get(moduleName);
         }
         
-        // Find ModuleScript by name in the game data
         const gameServer = gameServers.get(this.gameId);
         if (!gameServer) return null;
         
         let moduleInstance = null;
         
-        // Search for ModuleScript recursively
         function findModule(objects, targetName) {
             for (const obj of objects) {
                 if (obj.type === 'ModuleScript' && obj.name === targetName) {
@@ -155,7 +231,6 @@ class ModuleResolver {
             return null;
         }
         
-        // Execute ModuleScript in sandbox
         const sandbox = this.createModuleSandbox(moduleName);
         const moduleCode = moduleInstance.properties?.Source || moduleInstance.source || '';
         
@@ -221,7 +296,6 @@ function createGameAPI(gameId, playerManager, moduleResolver) {
                                 }
                             },
                             FireServer: function(player, ...args) {
-                                // This is called from client side
                                 console.log(`[${gameId}] 📡 FireServer from ${player?.name}: ${remoteName}`, args);
                                 remote.serverListeners.forEach(listener => {
                                     try {
@@ -307,7 +381,6 @@ function createGameAPI(gameId, playerManager, moduleResolver) {
                         }
                     }
                 },
-                // ModuleScript loader
                 require: (moduleName) => moduleResolver.require(moduleName)
             };
             return services[serviceName];
@@ -325,7 +398,6 @@ function createGameAPI(gameId, playerManager, moduleResolver) {
             console.error(`[${gameId}] ❌`, ...args);
         },
         
-        // Script information
         script: {
             Name: "ServerScript",
             Parent: { Name: "ServerScriptService" }
@@ -355,7 +427,6 @@ class PlayerManager {
         
         this.players.set(playerId, player);
         
-        // Fire callbacks
         this.playerAddedCallbacks.forEach(cb => {
             try {
                 cb(player);
@@ -364,7 +435,6 @@ class PlayerManager {
             }
         });
         
-        // Notify all players in the game
         fireAllClients(this.gameId, 'PlayerJoined', {
             id: playerId,
             name: player.displayName,
@@ -421,7 +491,6 @@ function runServerScripts(gameId, scripts, playerManager, moduleResolver) {
     
     for (const script of scripts) {
         try {
-            // Create sandbox with Roblox-like API
             const sandbox = vm.createContext({
                 ...gameAPI,
                 script: {
@@ -437,24 +506,20 @@ function runServerScripts(gameId, scripts, playerManager, moduleResolver) {
                 setInterval: setInterval,
                 clearTimeout: clearTimeout,
                 clearInterval: clearInterval,
-                // Module require
                 require: (moduleName) => moduleResolver.require(moduleName)
             });
             
             const scriptCode = script.source || script.properties?.Source || '';
             
-            // Add wrapper for automatic execution
             const wrappedCode = `
                 (function() {
                     ${scriptCode}
                     
-                    // Auto-execute initialization functions
                     if (typeof Init === 'function') Init();
                     if (typeof Start === 'function') Start();
                     if (typeof init === 'function') init();
                     if (typeof start === 'function') start();
                     
-                    // Return any exported functions for the game loop
                     return {
                         onUpdate: typeof onUpdate === 'function' ? onUpdate : null,
                         onPlayerJoined: typeof onPlayerJoined === 'function' ? onPlayerJoined : null,
@@ -485,16 +550,12 @@ function findAllScripts(objects, scriptType = null, parentPath = '') {
     const scripts = [];
     
     for (const obj of objects) {
-        // Check if this is a script
         if (obj.type === 'Script' || obj.type === 'LocalScript' || obj.type === 'ModuleScript') {
-            // Filter by type if specified
             if (scriptType === null || obj.type === scriptType) {
-                // Check location for ServerScripts (in ServerScriptService)
                 const isServerScript = obj.parent === 'service_serverscriptservice' || 
                                       parentPath.includes('ServerScriptService') ||
                                       obj.type === 'Script';
                 
-                // Check location for LocalScripts (in StarterPlayer, StarterGui)
                 const isLocalScript = obj.type === 'LocalScript' ||
                                      parentPath.includes('StarterPlayer') ||
                                      parentPath.includes('StarterGui');
@@ -512,7 +573,6 @@ function findAllScripts(objects, scriptType = null, parentPath = '') {
             }
         }
         
-        // Recursively check children
         if (obj.children && obj.children.length > 0) {
             const childScripts = findAllScripts(obj.children, scriptType, `${parentPath}/${obj.name}`);
             scripts.push(...childScripts);
@@ -535,26 +595,19 @@ async function loadGame(gameId) {
         
         console.log(`🎮 Loading game: ${game.name} (${gameId})`);
         
-        // Extract all scripts from game data
         const allScripts = game.gameData?.objects ? findAllScripts(game.gameData.objects) : [];
         
-        // Separate by type
         const serverScripts = allScripts.filter(s => s.type === 'Script' || s.isServerScript);
         const localScripts = allScripts.filter(s => s.type === 'LocalScript' || s.isLocalScript);
         const moduleScripts = allScripts.filter(s => s.type === 'ModuleScript');
         
         console.log(`📜 Found ${serverScripts.length} ServerScripts, ${localScripts.length} LocalScripts, ${moduleScripts.length} ModuleScripts`);
         
-        // Create player manager for this game
         const playerManager = new PlayerManager(gameId);
-        
-        // Create module resolver for this game
         const moduleResolver = new ModuleResolver(gameId, null);
         
-        // Run all ServerScripts
         const scriptResults = runServerScripts(gameId, serverScripts, playerManager, moduleResolver);
         
-        // Store game server instance
         const gameServer = {
             id: gameId,
             name: game.name,
@@ -569,14 +622,12 @@ async function loadGame(gameId) {
         
         gameServers.set(gameId, gameServer);
         
-        // Start update loop for game (60 FPS)
         let lastUpdate = Date.now();
         const updateInterval = setInterval(() => {
             const now = Date.now();
             const dt = Math.min(0.033, (now - lastUpdate) / 1000);
             lastUpdate = now;
             
-            // Call onUpdate for all scripts that have it
             for (const scriptResult of scriptResults) {
                 if (scriptResult.result && scriptResult.result.onUpdate) {
                     try {
@@ -594,7 +645,6 @@ async function loadGame(gameId) {
                 }
             }
             
-            // Call any registered update callbacks
             for (const callback of gameServer.updateCallbacks) {
                 try {
                     callback(dt);
@@ -622,7 +672,6 @@ function unloadGame(gameId) {
     }
 }
 
-// Get LocalScripts for a client
 function getLocalScriptsForClient(gameId) {
     const gameServer = gameServers.get(gameId);
     if (!gameServer) return [];
@@ -642,13 +691,11 @@ io.on('connection', (socket) => {
     let currentGameId = null;
     let currentPlayerId = null;
     
-    // Join game
     socket.on('joinGame', async (data) => {
         const { gameId, playerId, username, displayName, sessionToken } = data;
         
         console.log(`🎮 Player ${displayName} (${username}) joining game ${gameId}`);
         
-        // Load game if not already running
         let gameServer = gameServers.get(gameId);
         if (!gameServer) {
             gameServer = await loadGame(gameId);
@@ -661,16 +708,12 @@ io.on('connection', (socket) => {
         currentGameId = gameId;
         currentPlayerId = playerId || `player_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
         
-        // Add player to game
         const player = gameServer.playerManager.addPlayer(socket, currentPlayerId, username, displayName);
         
-        // Join socket room for this game
         socket.join(gameId);
         
-        // Get LocalScripts for this client
         const localScripts = getLocalScriptsForClient(gameId);
         
-        // Send initial game state to player
         socket.emit('gameJoined', {
             gameId: gameId,
             gameName: gameServer.name,
@@ -689,7 +732,6 @@ io.on('connection', (socket) => {
             localScripts: localScripts
         });
         
-        // Notify other players
         socket.to(gameId).emit('playerJoined', {
             id: player.id,
             name: player.displayName
@@ -698,7 +740,6 @@ io.on('connection', (socket) => {
         console.log(`✅ ${displayName} joined game ${gameId} (Total: ${gameServer.playerManager.getPlayerCount()})`);
     });
     
-    // Fire Server event (Client -> Server RemoteEvent)
     socket.on('remote:fireServer', (data) => {
         const { name, args } = data;
         const remote = getRemoteEvent(name);
@@ -707,7 +748,6 @@ io.on('connection', (socket) => {
             remote.serverListeners.forEach(listener => {
                 if (listener.gameId === currentGameId) {
                     try {
-                        // Create player object for callback
                         const gameServer = gameServers.get(currentGameId);
                         const player = gameServer?.playerManager.getPlayer(currentPlayerId);
                         listener.callback(player, ...(args || []));
@@ -719,7 +759,6 @@ io.on('connection', (socket) => {
         }
     });
     
-    // Update player position (for movement synchronization)
     socket.on('playerUpdate', (data) => {
         if (currentGameId) {
             socket.to(currentGameId).emit('playerUpdate', {
@@ -729,7 +768,6 @@ io.on('connection', (socket) => {
         }
     });
     
-    // Chat message
     socket.on('chatMessage', (data) => {
         if (currentGameId) {
             const gameServer = gameServers.get(currentGameId);
@@ -742,15 +780,11 @@ io.on('connection', (socket) => {
         }
     });
     
-    // Request to execute a specific script
     socket.on('executeScript', (data) => {
         const { scriptId, code, instanceId } = data;
-        // This allows dynamic script execution from client
         console.log(`📜 Client requested script execution: ${scriptId}`);
-        // Implement if needed
     });
     
-    // Disconnect
     socket.on('disconnect', () => {
         console.log(`🔌 Disconnected: ${socket.id}`);
         
@@ -881,24 +915,6 @@ app.delete('/api/gltf/:id', (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-
-// ==================== GAME STORAGE ====================
-const GAMES_FILE = path.join(__dirname, 'games.json');
-const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
-const INSTALLER_PATH = path.join(DOWNLOADS_DIR, 'TavianSetup.exe');
-
-if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
-if (!fs.existsSync(GAMES_FILE)) fs.writeFileSync(GAMES_FILE, JSON.stringify({ games: [], nextId: 100000000 }, null, 2));
-
-function readGames() { return JSON.parse(fs.readFileSync(GAMES_FILE)); }
-function writeGames(data) { fs.writeFileSync(GAMES_FILE, JSON.stringify(data, null, 2)); }
-function generateGameId() {
-    const games = readGames();
-    let newId = games.nextId || 100000000;
-    games.nextId = newId + 1;
-    writeGames(games);
-    return newId.toString();
-}
 
 // ==================== GAME API ENDPOINTS ====================
 app.get('/', (req, res) => {
@@ -1049,7 +1065,27 @@ app.get('/download', (req, res) => {
     res.download(INSTALLER_PATH, 'TavianSetup.exe');
 });
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+// ==================== FIX 3: Enhanced health check for Render ====================
+app.get('/api/health', (req, res) => { 
+    res.json({ 
+        status: 'ok', 
+        timestamp: new Date().toISOString(),
+        storage: USE_TMP ? '/tmp' : 'local',
+        uptime: process.uptime()
+    }); 
+});
+
+// ==================== FIX 4: Handle Render's shutdown gracefully ====================
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down gracefully...');
+    for (const [id, game] of gameServers) {
+        if (game.updateInterval) clearInterval(game.updateInterval);
+    }
+    server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+    });
+});
 
 // ==================== START SERVER ====================
 server.listen(PORT, '0.0.0.0', () => {
@@ -1059,35 +1095,12 @@ server.listen(PORT, '0.0.0.0', () => {
 ╠═══════════════════════════════════════════════════════════════════════════════╣
 ║  📡 HTTP Server: http://0.0.0.0:${PORT}                                        ║
 ║  🔌 Socket.IO Server: ws://0.0.0.0:${PORT}                                     ║
+║  💾 Storage Mode: ${USE_TMP ? 'Render /tmp (ephemeral)' : 'Local (persistent)'}    ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
 ║  🎮 SCRIPT TYPES SUPPORTED:                                                   ║
 ║  ✅ ServerScripts - Run on server, handle game logic                         ║
 ║  ✅ LocalScripts - Sent to client, handle UI and input                       ║
 ║  ✅ ModuleScripts - Shared code between scripts (require()!)                 ║
-╠═══════════════════════════════════════════════════════════════════════════════╣
-║  📚 MODULE SCRIPT EXAMPLE:                                                   ║
-║  -- SharedMath.lua (ModuleScript)                                            ║
-║  local SharedMath = {}                                                       ║
-║  function SharedMath.add(a, b) return a + b end                              ║
-║  return SharedMath                                                           ║
-║                                                                              ║
-║  -- GameServer.lua (ServerScript)                                            ║
-║  local SharedMath = require("SharedMath")                                    ║
-║  print(SharedMath.add(5, 3)) -- 8                                            ║
-╠═══════════════════════════════════════════════════════════════════════════════╣
-║  📡 REMOTEEVENT EXAMPLE:                                                     ║
-║  -- ServerScript                                                             ║
-║  local Coins = game.GetService("ReplicatedStorage"):WaitForChild("Coins")    ║
-║  Coins.OnServerEvent(function(player, amount)                                ║
-║      Coins.FireClient(player, player.data.coins + amount)                    ║
-║  end)                                                                        ║
-║                                                                              ║
-║  -- LocalScript (client)                                                     ║
-║  local Coins = game:GetService("ReplicatedStorage"):WaitForChild("Coins")    ║
-║  Coins.OnClientEvent(function(newTotal)                                      ║
-║      print("Coins updated:", newTotal)                                       ║
-║  end)                                                                        ║
-║  Coins:FireServer(5) -- Add 5 coins                                          ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
     `);
 });
