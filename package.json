@@ -1,7 +1,7 @@
 {
-  "name": "tavianstudio-server",
-  "version": "1.0.0",
-  "description": "TavianStudio Game Server with ServerScript, LocalScript, and ModuleScript support",
+  "name": "tavian-studio-backend",
+  "version": "2.0.0",
+  "description": "Tavian Studio Game Server - Multiplayer Game Backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,11 +9,11 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "socket.io": "^4.6.1",
     "cors": "^2.8.5",
+    "socket.io": "^4.6.1",
     "multer": "^1.4.5-lts.1"
   },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
