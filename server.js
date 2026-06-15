@@ -75,25 +75,26 @@ function writeExeIndex(data) { fs.writeFileSync(EXE_INDEX_FILE, JSON.stringify(d
 function readGltfIndex() { return JSON.parse(fs.readFileSync(GLTF_INDEX_FILE)); }
 function writeGltfIndex(data) { fs.writeFileSync(GLTF_INDEX_FILE, JSON.stringify(data, null, 2)); }
 
-// ==================== GAME RUNTIME SYSTEM ====================
+// ==================== PURE SCRIPT EXECUTION ENGINE ====================
 
 // Store active game servers
-const gameServers = new Map(); // gameId -> { players: Map(playerId -> playerData), serverScripts, remotes, worldState }
+const gameServers = new Map();
 
 // RemoteEvents storage
-const remotes = new Map(); // remoteName -> { serverListeners: [], clientListeners: [] }
+const remoteEvents = new Map();
 
-// Player sessions
-const playerSessions = new Map(); // socketId -> { playerId, username, displayName, gameId }
+// Module cache for ModuleScripts
+const moduleCache = new Map();
 
-function getRemote(name) {
-    if (!remotes.has(name)) {
-        remotes.set(name, { serverListeners: [], clientListeners: [] });
+// Get or create RemoteEvent
+function getRemoteEvent(name) {
+    if (!remoteEvents.has(name)) {
+        remoteEvents.set(name, { serverListeners: [], clientListeners: [] });
     }
-    return remotes.get(name);
+    return remoteEvents.get(name);
 }
 
-// Fire client event to specific player
+// Fire client event
 function fireClient(socket, remoteName, ...args) {
     if (socket && socket.connected) {
         socket.emit('remote:fireClient', {
@@ -103,16 +104,103 @@ function fireClient(socket, remoteName, ...args) {
     }
 }
 
-// Fire client event to all players in a game
-function fireAllClients(gameId, remoteName, ...args) {
-    io.to(gameId).emit('remote:fireClient', {
+// Fire to all clients in a game
+function fireAllClients(roomId, remoteName, ...args) {
+    io.to(roomId).emit('remote:fireClient', {
         name: remoteName,
         args: args
     });
 }
 
+// ModuleScript loader and resolver
+class ModuleResolver {
+    constructor(gameId, gameAPI) {
+        this.gameId = gameId;
+        this.gameAPI = gameAPI;
+        this.loadedModules = new Map();
+    }
+    
+    require(moduleName, searchPath = null) {
+        // Check cache first
+        if (this.loadedModules.has(moduleName)) {
+            return this.loadedModules.get(moduleName);
+        }
+        
+        // Find ModuleScript by name in the game data
+        const gameServer = gameServers.get(this.gameId);
+        if (!gameServer) return null;
+        
+        let moduleInstance = null;
+        
+        // Search for ModuleScript recursively
+        function findModule(objects, targetName) {
+            for (const obj of objects) {
+                if (obj.type === 'ModuleScript' && obj.name === targetName) {
+                    return obj;
+                }
+                if (obj.children && obj.children.length > 0) {
+                    const found = findModule(obj.children, targetName);
+                    if (found) return found;
+                }
+            }
+            return null;
+        }
+        
+        if (gameServer.gameData && gameServer.gameData.objects) {
+            moduleInstance = findModule(gameServer.gameData.objects, moduleName);
+        }
+        
+        if (!moduleInstance) {
+            console.warn(`[${this.gameId}] ModuleScript not found: ${moduleName}`);
+            return null;
+        }
+        
+        // Execute ModuleScript in sandbox
+        const sandbox = this.createModuleSandbox(moduleName);
+        const moduleCode = moduleInstance.properties?.Source || moduleInstance.source || '';
+        
+        try {
+            const wrappedCode = `
+                (function(module, exports, require) {
+                    ${moduleCode}
+                    return module.exports;
+                })(module, module.exports, require);
+            `;
+            
+            const result = vm.runInContext(wrappedCode, sandbox);
+            this.loadedModules.set(moduleName, result);
+            console.log(`📦 [${this.gameId}] Loaded ModuleScript: ${moduleName}`);
+            return result;
+        } catch (error) {
+            console.error(`❌ [${this.gameId}] ModuleScript error ${moduleName}:`, error);
+            return null;
+        }
+    }
+    
+    createModuleSandbox(moduleName) {
+        const resolver = this;
+        
+        const sandbox = vm.createContext({
+            module: { exports: {} },
+            exports: {},
+            require: (name) => resolver.require(name),
+            console: {
+                log: (...args) => console.log(`[${this.gameId}][Module:${moduleName}]`, ...args),
+                warn: (...args) => console.warn(`[${this.gameId}][Module:${moduleName}]`, ...args),
+                error: (...args) => console.error(`[${this.gameId}][Module:${moduleName}]`, ...args)
+            },
+            setTimeout: setTimeout,
+            setInterval: setInterval,
+            clearTimeout: clearTimeout,
+            clearInterval: clearInterval
+        });
+        
+        return sandbox;
+    }
+}
+
 // Create Roblox-like game API for ServerScripts
-function createGameAPI(gameId, playerManager) {
+function createGameAPI(gameId, playerManager, moduleResolver) {
     return {
         gameId: gameId,
         
@@ -120,7 +208,7 @@ function createGameAPI(gameId, playerManager) {
             const services = {
                 ReplicatedStorage: {
                     WaitForChild: function(remoteName) {
-                        const remote = getRemote(remoteName);
+                        const remote = getRemoteEvent(remoteName);
                         return {
                             FireAllClients: function(...args) {
                                 fireAllClients(gameId, remoteName, ...args);
@@ -132,9 +220,25 @@ function createGameAPI(gameId, playerManager) {
                                     console.log(`[${gameId}] 🔥 FireClient to ${player.name}: ${remoteName}`, args);
                                 }
                             },
+                            FireServer: function(player, ...args) {
+                                // This is called from client side
+                                console.log(`[${gameId}] 📡 FireServer from ${player?.name}: ${remoteName}`, args);
+                                remote.serverListeners.forEach(listener => {
+                                    try {
+                                        if (listener.gameId === gameId) {
+                                            listener.callback(player, ...args);
+                                        }
+                                    } catch (e) {
+                                        console.error(`RemoteEvent error:`, e);
+                                    }
+                                });
+                            },
                             OnServerEvent: function(callback) {
                                 remote.serverListeners.push({ callback, gameId });
                                 console.log(`[${gameId}] 📡 OnServerEvent registered: ${remoteName}`);
+                            },
+                            OnClientEvent: function(callback) {
+                                remote.clientListeners.push({ callback, gameId });
                             }
                         };
                     }
@@ -143,9 +247,10 @@ function createGameAPI(gameId, playerManager) {
                     GetPlayers: function() {
                         return playerManager.getAllPlayers();
                     },
-                    GetPlayer: function(playerId) {
-                        return playerManager.getPlayer(playerId);
+                    GetPlayerByUserId: function(userId) {
+                        return playerManager.getPlayer(userId);
                     },
+                    LocalPlayer: null,
                     PlayerAdded: {
                         Connect: function(callback) {
                             playerManager.onPlayerAdded(callback);
@@ -168,12 +273,18 @@ function createGameAPI(gameId, playerManager) {
                     RemovePart: function(partId) {
                         this.Parts.delete(partId);
                         fireAllClients(gameId, 'PartRemoved', partId);
+                    },
+                    FindFirstChild: function(name) {
+                        for (const [id, part] of this.Parts) {
+                            if (part.name === name) return part;
+                        }
+                        return null;
                     }
                 },
                 Chat: {
                     SendMessage: function(player, message) {
                         fireAllClients(gameId, 'ChatMessage', {
-                            player: player.name,
+                            player: player?.displayName || player?.name || 'Server',
                             message: message
                         });
                     }
@@ -182,12 +293,22 @@ function createGameAPI(gameId, playerManager) {
                     Heartbeat: {
                         Connect: function(callback) {
                             const interval = setInterval(() => {
-                                callback(1/60); // dt = 1/60
+                                callback(1/60);
                             }, 1000/60);
-                            return function disconnect() { clearInterval(interval); };
+                            return { Disconnect: () => clearInterval(interval) };
+                        }
+                    },
+                    Stepped: {
+                        Connect: function(callback) {
+                            const interval = setInterval(() => {
+                                callback(1/60, Date.now() / 1000);
+                            }, 1000/60);
+                            return { Disconnect: () => clearInterval(interval) };
                         }
                     }
-                }
+                },
+                // ModuleScript loader
+                require: (moduleName) => moduleResolver.require(moduleName)
             };
             return services[serviceName];
         },
@@ -202,6 +323,12 @@ function createGameAPI(gameId, playerManager) {
         
         error: function(...args) {
             console.error(`[${gameId}] ❌`, ...args);
+        },
+        
+        // Script information
+        script: {
+            Name: "ServerScript",
+            Parent: { Name: "ServerScriptService" }
         }
     };
 }
@@ -210,29 +337,38 @@ function createGameAPI(gameId, playerManager) {
 class PlayerManager {
     constructor(gameId) {
         this.gameId = gameId;
-        this.players = new Map(); // playerId -> { id, name, displayName, socket, data, joinedAt }
+        this.players = new Map();
         this.playerAddedCallbacks = [];
         this.playerRemovedCallbacks = [];
     }
     
-    addPlayer(socket, playerId, username, displayName) {
+    addPlayer(socket, playerId, username, displayName, userData = {}) {
         const player = {
             id: playerId,
+            userId: playerId,
             name: username,
-            displayName: displayName,
+            displayName: displayName || username,
             socket: socket,
-            data: new Map(), // Custom data storage
+            data: new Map(Object.entries(userData)),
             joinedAt: Date.now()
         };
+        
         this.players.set(playerId, player);
         
         // Fire callbacks
-        this.playerAddedCallbacks.forEach(cb => cb(player));
+        this.playerAddedCallbacks.forEach(cb => {
+            try {
+                cb(player);
+            } catch (e) {
+                console.error(`PlayerAdded callback error:`, e);
+            }
+        });
         
         // Notify all players in the game
         fireAllClients(this.gameId, 'PlayerJoined', {
             id: playerId,
-            name: displayName
+            name: player.displayName,
+            userId: player.userId
         });
         
         return player;
@@ -242,13 +378,23 @@ class PlayerManager {
         const player = this.players.get(playerId);
         if (player) {
             this.players.delete(playerId);
-            this.playerRemovedCallbacks.forEach(cb => cb(player));
+            this.playerRemovedCallbacks.forEach(cb => {
+                try {
+                    cb(player);
+                } catch (e) {
+                    console.error(`PlayerRemoved callback error:`, e);
+                }
+            });
             fireAllClients(this.gameId, 'PlayerLeft', playerId);
         }
     }
     
     getPlayer(playerId) {
         return this.players.get(playerId);
+    }
+    
+    getPlayerByUserId(userId) {
+        return this.players.get(userId);
     }
     
     getAllPlayers() {
@@ -269,34 +415,32 @@ class PlayerManager {
 }
 
 // Run ServerScripts for a game
-function runServerScripts(gameId, scripts, playerManager) {
-    const gameAPI = createGameAPI(gameId, playerManager);
+function runServerScripts(gameId, scripts, playerManager, moduleResolver) {
+    const gameAPI = createGameAPI(gameId, playerManager, moduleResolver);
     const results = [];
     
     for (const script of scripts) {
         try {
             // Create sandbox with Roblox-like API
-            const sandbox = {
+            const sandbox = vm.createContext({
                 ...gameAPI,
-                // Script-specific variables
                 script: {
                     Name: script.name,
                     Parent: { Name: "ServerScriptService" }
                 },
-                // Common globals
-                setTimeout: setTimeout,
-                setInterval: setInterval,
-                clearTimeout: clearTimeout,
-                clearInterval: clearInterval,
                 console: {
                     log: (...args) => console.log(`[${gameId}][${script.name}]`, ...args),
                     warn: (...args) => console.warn(`[${gameId}][${script.name}]`, ...args),
                     error: (...args) => console.error(`[${gameId}][${script.name}]`, ...args)
-                }
-            };
+                },
+                setTimeout: setTimeout,
+                setInterval: setInterval,
+                clearTimeout: clearTimeout,
+                clearInterval: clearInterval,
+                // Module require
+                require: (moduleName) => moduleResolver.require(moduleName)
+            });
             
-            // Create context and run script
-            vm.createContext(sandbox);
             const scriptCode = script.source || script.properties?.Source || '';
             
             // Add wrapper for automatic execution
@@ -304,15 +448,18 @@ function runServerScripts(gameId, scripts, playerManager) {
                 (function() {
                     ${scriptCode}
                     
-                    // Auto-execute if there's a main function or initialization
+                    // Auto-execute initialization functions
+                    if (typeof Init === 'function') Init();
+                    if (typeof Start === 'function') Start();
                     if (typeof init === 'function') init();
                     if (typeof start === 'function') start();
                     
-                    // Return any exported functions
+                    // Return any exported functions for the game loop
                     return {
                         onUpdate: typeof onUpdate === 'function' ? onUpdate : null,
                         onPlayerJoined: typeof onPlayerJoined === 'function' ? onPlayerJoined : null,
-                        onPlayerLeft: typeof onPlayerLeft === 'function' ? onPlayerLeft : null
+                        onPlayerLeft: typeof onPlayerLeft === 'function' ? onPlayerLeft : null,
+                        onTick: typeof onTick === 'function' ? onTick : null
                     };
                 })();
             `;
@@ -323,7 +470,6 @@ function runServerScripts(gameId, scripts, playerManager) {
             
         } catch (error) {
             console.error(`❌ [${gameId}] Error in script ${script.name}:`, error);
-            // Fire error to clients
             fireAllClients(gameId, 'ScriptError', {
                 script: script.name,
                 error: error.message
@@ -332,6 +478,48 @@ function runServerScripts(gameId, scripts, playerManager) {
     }
     
     return results;
+}
+
+// Find all scripts in game data recursively
+function findAllScripts(objects, scriptType = null, parentPath = '') {
+    const scripts = [];
+    
+    for (const obj of objects) {
+        // Check if this is a script
+        if (obj.type === 'Script' || obj.type === 'LocalScript' || obj.type === 'ModuleScript') {
+            // Filter by type if specified
+            if (scriptType === null || obj.type === scriptType) {
+                // Check location for ServerScripts (in ServerScriptService)
+                const isServerScript = obj.parent === 'service_serverscriptservice' || 
+                                      parentPath.includes('ServerScriptService') ||
+                                      obj.type === 'Script';
+                
+                // Check location for LocalScripts (in StarterPlayer, StarterGui)
+                const isLocalScript = obj.type === 'LocalScript' ||
+                                     parentPath.includes('StarterPlayer') ||
+                                     parentPath.includes('StarterGui');
+                
+                scripts.push({
+                    id: obj.id,
+                    name: obj.name,
+                    type: obj.type,
+                    source: obj.properties?.Source || obj.source || '',
+                    properties: obj.properties || {},
+                    isServerScript: isServerScript,
+                    isLocalScript: isLocalScript,
+                    parentPath: parentPath
+                });
+            }
+        }
+        
+        // Recursively check children
+        if (obj.children && obj.children.length > 0) {
+            const childScripts = findAllScripts(obj.children, scriptType, `${parentPath}/${obj.name}`);
+            scripts.push(...childScripts);
+        }
+    }
+    
+    return scripts;
 }
 
 // Load game and start server
@@ -347,43 +535,24 @@ async function loadGame(gameId) {
         
         console.log(`🎮 Loading game: ${game.name} (${gameId})`);
         
-        // Extract all ServerScripts from game data
-        const serverScripts = [];
+        // Extract all scripts from game data
+        const allScripts = game.gameData?.objects ? findAllScripts(game.gameData.objects) : [];
         
-        function findScripts(objects, parentPath = '') {
-            for (const obj of objects) {
-                if (obj.type === 'Script' && obj.name) {
-                    // Check if it's in ServerScriptService
-                    const isServerScript = obj.parent === 'service_serverscriptservice' || 
-                                          parentPath.includes('ServerScriptService');
-                    if (isServerScript) {
-                        serverScripts.push({
-                            id: obj.id,
-                            name: obj.name,
-                            source: obj.properties?.Source || '',
-                            properties: obj.properties
-                        });
-                    }
-                }
-                
-                // Recursively check children
-                if (obj.children && obj.children.length > 0) {
-                    findScripts(obj.children, `${parentPath}/${obj.name}`);
-                }
-            }
-        }
+        // Separate by type
+        const serverScripts = allScripts.filter(s => s.type === 'Script' || s.isServerScript);
+        const localScripts = allScripts.filter(s => s.type === 'LocalScript' || s.isLocalScript);
+        const moduleScripts = allScripts.filter(s => s.type === 'ModuleScript');
         
-        if (game.gameData && game.gameData.objects) {
-            findScripts(game.gameData.objects);
-        }
-        
-        console.log(`📜 Found ${serverScripts.length} ServerScripts in ${game.name}`);
+        console.log(`📜 Found ${serverScripts.length} ServerScripts, ${localScripts.length} LocalScripts, ${moduleScripts.length} ModuleScripts`);
         
         // Create player manager for this game
         const playerManager = new PlayerManager(gameId);
         
+        // Create module resolver for this game
+        const moduleResolver = new ModuleResolver(gameId, null);
+        
         // Run all ServerScripts
-        const scriptResults = runServerScripts(gameId, serverScripts, playerManager);
+        const scriptResults = runServerScripts(gameId, serverScripts, playerManager, moduleResolver);
         
         // Store game server instance
         const gameServer = {
@@ -392,8 +561,10 @@ async function loadGame(gameId) {
             gameData: game.gameData,
             playerManager: playerManager,
             scripts: scriptResults,
-            remotes: remotes,
-            startedAt: Date.now()
+            localScripts: localScripts,
+            moduleResolver: moduleResolver,
+            startedAt: Date.now(),
+            updateCallbacks: []
         };
         
         gameServers.set(gameId, gameServer);
@@ -414,6 +585,20 @@ async function loadGame(gameId) {
                         console.error(`Error in onUpdate for ${scriptResult.script.name}:`, error);
                     }
                 }
+                if (scriptResult.result && scriptResult.result.onTick) {
+                    try {
+                        scriptResult.result.onTick(dt);
+                    } catch (error) {
+                        console.error(`Error in onTick for ${scriptResult.script.name}:`, error);
+                    }
+                }
+            }
+            
+            // Call any registered update callbacks
+            for (const callback of gameServer.updateCallbacks) {
+                try {
+                    callback(dt);
+                } catch (e) {}
             }
         }, 1000 / 60);
         
@@ -435,6 +620,19 @@ function unloadGame(gameId) {
         gameServers.delete(gameId);
         console.log(`🛑 Game server stopped: ${gameServer.name} (${gameId})`);
     }
+}
+
+// Get LocalScripts for a client
+function getLocalScriptsForClient(gameId) {
+    const gameServer = gameServers.get(gameId);
+    if (!gameServer) return [];
+    
+    return gameServer.localScripts.map(script => ({
+        id: script.id,
+        name: script.name,
+        source: script.source,
+        type: script.type
+    }));
 }
 
 // ==================== SOCKET.IO HANDLERS ====================
@@ -466,58 +664,59 @@ io.on('connection', (socket) => {
         // Add player to game
         const player = gameServer.playerManager.addPlayer(socket, currentPlayerId, username, displayName);
         
-        // Store session info
-        playerSessions.set(socket.id, {
-            playerId: currentPlayerId,
-            username: username,
-            displayName: displayName,
-            gameId: gameId
-        });
-        
         // Join socket room for this game
         socket.join(gameId);
+        
+        // Get LocalScripts for this client
+        const localScripts = getLocalScriptsForClient(gameId);
         
         // Send initial game state to player
         socket.emit('gameJoined', {
             gameId: gameId,
             gameName: gameServer.name,
             playerId: currentPlayerId,
+            player: {
+                id: player.id,
+                name: player.displayName,
+                userId: player.userId
+            },
             players: gameServer.playerManager.getAllPlayers().map(p => ({
                 id: p.id,
-                name: p.displayName
+                name: p.displayName,
+                userId: p.userId
             })),
-            gameData: gameServer.gameData
+            gameData: gameServer.gameData,
+            localScripts: localScripts
         });
         
-        console.log(`✅ ${displayName} joined game ${gameId} (Total players: ${gameServer.playerManager.getPlayerCount()})`);
+        // Notify other players
+        socket.to(gameId).emit('playerJoined', {
+            id: player.id,
+            name: player.displayName
+        });
+        
+        console.log(`✅ ${displayName} joined game ${gameId} (Total: ${gameServer.playerManager.getPlayerCount()})`);
     });
     
-    // Fire Server event (Client -> Server)
+    // Fire Server event (Client -> Server RemoteEvent)
     socket.on('remote:fireServer', (data) => {
         const { name, args } = data;
-        const remote = getRemote(name);
+        const remote = getRemoteEvent(name);
         
-        // Get player info
-        const session = playerSessions.get(socket.id);
-        if (!session) return;
-        
-        // Create player object for callback
-        const player = {
-            id: session.playerId,
-            name: session.username,
-            displayName: session.displayName,
-            socket: socket,
-            data: new Map()
-        };
-        
-        // Execute all server listeners
-        remote.serverListeners.forEach(listener => {
-            try {
-                listener.callback(player, ...(args || []));
-            } catch (error) {
-                console.error(`Error in remote listener for ${name}:`, error);
-            }
-        });
+        if (remote && remote.serverListeners) {
+            remote.serverListeners.forEach(listener => {
+                if (listener.gameId === currentGameId) {
+                    try {
+                        // Create player object for callback
+                        const gameServer = gameServers.get(currentGameId);
+                        const player = gameServer?.playerManager.getPlayer(currentPlayerId);
+                        listener.callback(player, ...(args || []));
+                    } catch (error) {
+                        console.error(`Error in remote listener for ${name}:`, error);
+                    }
+                }
+            });
+        }
     });
     
     // Update player position (for movement synchronization)
@@ -533,29 +732,35 @@ io.on('connection', (socket) => {
     // Chat message
     socket.on('chatMessage', (data) => {
         if (currentGameId) {
-            const session = playerSessions.get(socket.id);
+            const gameServer = gameServers.get(currentGameId);
+            const player = gameServer?.playerManager.getPlayer(currentPlayerId);
             io.to(currentGameId).emit('chatMessage', {
-                player: session?.displayName || 'Unknown',
+                player: player?.displayName || 'Unknown',
                 message: data.message,
                 timestamp: Date.now()
             });
         }
     });
     
+    // Request to execute a specific script
+    socket.on('executeScript', (data) => {
+        const { scriptId, code, instanceId } = data;
+        // This allows dynamic script execution from client
+        console.log(`📜 Client requested script execution: ${scriptId}`);
+        // Implement if needed
+    });
+    
     // Disconnect
     socket.on('disconnect', () => {
         console.log(`🔌 Disconnected: ${socket.id}`);
         
-        const session = playerSessions.get(socket.id);
-        if (session && session.gameId) {
-            const gameServer = gameServers.get(session.gameId);
+        if (currentGameId && currentPlayerId) {
+            const gameServer = gameServers.get(currentGameId);
             if (gameServer) {
-                gameServer.playerManager.removePlayer(session.playerId);
-                console.log(`👋 Player ${session.displayName} left game ${session.gameId}`);
+                gameServer.playerManager.removePlayer(currentPlayerId);
+                console.log(`👋 Player left game ${currentGameId}`);
             }
         }
-        
-        playerSessions.delete(socket.id);
     });
 });
 
@@ -701,7 +906,7 @@ app.get('/', (req, res) => {
         status: 'ok',
         message: 'Tavian Studio API with Socket.IO Game Server',
         activeGames: gameServers.size,
-        activePlayers: playerSessions.size,
+        activePlayers: Array.from(gameServers.values()).reduce((sum, g) => sum + g.playerManager.getPlayerCount(), 0),
         endpoints: {
             exe: 'GET/POST/DELETE /api/exe/*',
             gltf: 'GET/POST/DELETE /api/gltf/*',
@@ -787,9 +992,7 @@ app.delete('/api/games/:gameId', (req, res) => {
         const gameIndex = games.games.findIndex(g => g.id === req.params.gameId);
         if (gameIndex === -1) return res.status(404).json({ error: 'Game not found' });
         
-        // Stop game server if running
         unloadGame(req.params.gameId);
-        
         games.games.splice(gameIndex, 1);
         writeGames(games);
         res.json({ success: true });
@@ -805,10 +1008,11 @@ app.get('/api/active-games', (req, res) => {
             id: id,
             name: game.name,
             players: game.playerManager.getPlayerCount(),
-            startedAt: game.startedAt
+            startedAt: game.startedAt,
+            scriptsRunning: game.scripts.length
         });
     }
-    res.json({ activeGames, totalPlayers: playerSessions.size });
+    res.json({ activeGames, totalPlayers: Array.from(gameServers.values()).reduce((sum, g) => sum + g.playerManager.getPlayerCount(), 0) });
 });
 
 app.get('/api/game-stats/:gameId', (req, res) => {
@@ -818,7 +1022,8 @@ app.get('/api/game-stats/:gameId', (req, res) => {
         name: game.name,
         players: game.playerManager.getPlayerCount(),
         startedAt: game.startedAt,
-        scriptsRunning: game.scripts.length
+        scriptsRunning: game.scripts.length,
+        localScripts: game.localScripts.length
     });
 });
 
@@ -835,7 +1040,7 @@ app.get('/api/stats', (req, res) => {
         games: { total: games.games.length, public: games.games.filter(g => g.isPublic === true).length, plays: games.games.reduce((sum, g) => sum + (g.plays || 0), 0) },
         exeFiles: { total: exeIndex.files.length },
         gltfFiles: { total: gltfIndex.files.length },
-        activeServers: { games: gameServers.size, players: playerSessions.size }
+        activeServers: { games: gameServers.size, players: Array.from(gameServers.values()).reduce((sum, g) => sum + g.playerManager.getPlayerCount(), 0) }
     });
 });
 
@@ -854,27 +1059,35 @@ server.listen(PORT, '0.0.0.0', () => {
 ╠═══════════════════════════════════════════════════════════════════════════════╣
 ║  📡 HTTP Server: http://0.0.0.0:${PORT}                                        ║
 ║  🔌 Socket.IO Server: ws://0.0.0.0:${PORT}                                     ║
-║  🌐 Public URL: https://tavian-api.onrender.com                               ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
-║  🎮 GAME SERVER FEATURES:                                                     ║
-║  ✅ ServerScripts execution with vm2                                          ║
-║  ✅ RemoteEvents (FireServer/FireClient)                                      ║
-║  ✅ Real-time player synchronization                                          ║
-║  ✅ Roblox-like API (GetService, WaitForChild)                                ║
-║  ✅ 60 FPS update loop for scripts                                            ║
+║  🎮 SCRIPT TYPES SUPPORTED:                                                   ║
+║  ✅ ServerScripts - Run on server, handle game logic                         ║
+║  ✅ LocalScripts - Sent to client, handle UI and input                       ║
+║  ✅ ModuleScripts - Shared code between scripts (require()!)                 ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
-║  📚 AVAILABLE SERVICES IN SCRIPTS:                                            ║
-║  • game.GetService("ReplicatedStorage")                                       ║
-║  • game.GetService("Players") - GetPlayers, PlayerAdded/Removed              ║
-║  • game.GetService("Workspace") - AddPart, RemovePart                         ║
-║  • game.GetService("Chat") - SendMessage                                      ║
-║  • game.GetService("RunService") - Heartbeat                                  ║
+║  📚 MODULE SCRIPT EXAMPLE:                                                   ║
+║  -- SharedMath.lua (ModuleScript)                                            ║
+║  local SharedMath = {}                                                       ║
+║  function SharedMath.add(a, b) return a + b end                              ║
+║  return SharedMath                                                           ║
+║                                                                              ║
+║  -- GameServer.lua (ServerScript)                                            ║
+║  local SharedMath = require("SharedMath")                                    ║
+║  print(SharedMath.add(5, 3)) -- 8                                            ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
-║  📡 REMOTEEVENT EXAMPLE:                                                      ║
-║  const Coins = game.GetService("ReplicatedStorage").WaitForChild("Coins");    ║
-║  Coins.OnServerEvent((player, amount) => {                                    ║
-║      Coins.FireClient(player, player.data.get("coins") + amount);            ║
-║  });                                                                          ║
+║  📡 REMOTEEVENT EXAMPLE:                                                     ║
+║  -- ServerScript                                                             ║
+║  local Coins = game.GetService("ReplicatedStorage"):WaitForChild("Coins")    ║
+║  Coins.OnServerEvent(function(player, amount)                                ║
+║      Coins.FireClient(player, player.data.coins + amount)                    ║
+║  end)                                                                        ║
+║                                                                              ║
+║  -- LocalScript (client)                                                     ║
+║  local Coins = game:GetService("ReplicatedStorage"):WaitForChild("Coins")    ║
+║  Coins.OnClientEvent(function(newTotal)                                      ║
+║      print("Coins updated:", newTotal)                                       ║
+║  end)                                                                        ║
+║  Coins:FireServer(5) -- Add 5 coins                                          ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
     `);
 });
