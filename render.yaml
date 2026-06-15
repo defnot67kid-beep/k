@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: tavian-studio-backend
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 18.17.0
+    healthCheckPath: /api/health
+    autoDeploy: true
