@@ -1,4 +1,4 @@
 node_modules/
-games.json
-.DS_Store
+storage/
 *.log
+.DS_Store
