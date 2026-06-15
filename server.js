@@ -165,6 +165,9 @@ const remoteEvents = new Map();
 // Module cache for ModuleScripts
 const moduleCache = new Map();
 
+// Store registered ServerScripts per game
+const serverScriptsRegistry = new Map();
+
 // Get or create RemoteEvent
 function getRemoteEvent(name) {
     if (!remoteEvents.has(name)) {
@@ -189,6 +192,99 @@ function fireAllClients(roomId, remoteName, ...args) {
         name: remoteName,
         args: args
     });
+}
+
+// ==================== NEW: ServerScript Execution with RemoteEvent Support ====================
+function executeServerScript(gameId, scriptId, scriptName, scriptCode, playerManager) {
+    const gameServer = gameServers.get(gameId);
+    if (!gameServer) return null;
+    
+    // Create sandbox for ServerScript
+    const scriptHandlers = {};
+    
+    const sandbox = {
+        print: (...args) => console.log(`[ServerScript:${scriptName}]`, ...args),
+        
+        game: {
+            GetService: (serviceName) => {
+                const services = {
+                    ReplicatedStorage: {
+                        WaitForChild: (remoteName) => {
+                            // Get or create RemoteEvent
+                            const remote = getRemoteEvent(remoteName);
+                            
+                            return {
+                                FireClient: (player, ...args) => {
+                                    if (player && player.socket) {
+                                        fireClient(player.socket, remoteName, ...args);
+                                        console.log(`[${gameId}] 🔥 FireClient to ${player.name}: ${remoteName}`);
+                                    }
+                                },
+                                FireAllClients: (...args) => {
+                                    fireAllClients(gameId, remoteName, ...args);
+                                    console.log(`[${gameId}] 🔥 FireAllClients: ${remoteName}`);
+                                },
+                                OnServerEvent: (callback) => {
+                                    scriptHandlers[remoteName] = callback;
+                                    console.log(`[${gameId}] 📡 ServerScript listening for: ${remoteName}`);
+                                }
+                            };
+                        }
+                    },
+                    Players: {
+                        GetPlayers: () => playerManager.getAllPlayers(),
+                        GetPlayerByUserId: (userId) => playerManager.getPlayer(userId),
+                        PlayerAdded: {
+                            Connect: (callback) => playerManager.onPlayerAdded(callback)
+                        },
+                        PlayerRemoved: {
+                            Connect: (callback) => playerManager.onPlayerRemoved(callback)
+                        }
+                    },
+                    RunService: {
+                        Heartbeat: {
+                            Connect: (callback) => {
+                                const interval = setInterval(() => callback(1/60), 1000/60);
+                                return { Disconnect: () => clearInterval(interval) };
+                            }
+                        }
+                    }
+                };
+                return services[serviceName];
+            }
+        },
+        
+        spawn: (fn) => setTimeout(fn, 0),
+        wait: (seconds) => new Promise(resolve => setTimeout(resolve, seconds * 1000))
+    };
+    
+    try {
+        // Create and execute the ServerScript
+        const wrappedCode = `
+            (function() {
+                ${scriptCode}
+                
+                if (typeof init === 'function') init();
+                if (typeof start === 'function') start();
+                if (typeof onStart === 'function') onStart();
+            })();
+        `;
+        
+        const fn = new Function('sandbox', `with(sandbox) { ${wrappedCode} }`);
+        fn(sandbox);
+        
+        // Store handlers for this script
+        if (!serverScriptsRegistry.has(gameId)) {
+            serverScriptsRegistry.set(gameId, new Map());
+        }
+        serverScriptsRegistry.get(gameId).set(scriptId, scriptHandlers);
+        
+        console.log(`✅ [${gameId}] ServerScript loaded: ${scriptName}`);
+        return scriptHandlers;
+    } catch (error) {
+        console.error(`❌ [${gameId}] ServerScript error ${scriptName}:`, error);
+        return null;
+    }
 }
 
 // ModuleScript loader and resolver
@@ -668,6 +764,7 @@ function unloadGame(gameId) {
     if (gameServer) {
         if (gameServer.updateInterval) clearInterval(gameServer.updateInterval);
         gameServers.delete(gameId);
+        serverScriptsRegistry.delete(gameId);
         console.log(`🛑 Game server stopped: ${gameServer.name} (${gameId})`);
     }
 }
@@ -690,6 +787,32 @@ io.on('connection', (socket) => {
     
     let currentGameId = null;
     let currentPlayerId = null;
+    
+    // ==================== NEW: Register ServerScript dynamically ====================
+    socket.on('registerServerScript', (data) => {
+        const { scriptId, scriptName, code } = data;
+        
+        if (!currentGameId) {
+            socket.emit('scriptError', { scriptId, error: 'Not in a game' });
+            return;
+        }
+        
+        console.log(`📜 Registering ServerScript: ${scriptName} for game ${currentGameId}`);
+        
+        const gameServer = gameServers.get(currentGameId);
+        if (!gameServer) {
+            socket.emit('scriptError', { scriptId, error: 'Game not found' });
+            return;
+        }
+        
+        const handlers = executeServerScript(currentGameId, scriptId, scriptName, code, gameServer.playerManager);
+        
+        if (handlers) {
+            socket.emit('scriptRegistered', { scriptId, success: true });
+        } else {
+            socket.emit('scriptError', { scriptId, error: 'Failed to execute script' });
+        }
+    });
     
     socket.on('joinGame', async (data) => {
         const { gameId, playerId, username, displayName, sessionToken } = data;
@@ -740,10 +863,38 @@ io.on('connection', (socket) => {
         console.log(`✅ ${displayName} joined game ${gameId} (Total: ${gameServer.playerManager.getPlayerCount()})`);
     });
     
+    // ==================== FIXED: Handle RemoteEvent and route to ServerScripts ====================
     socket.on('remote:fireServer', (data) => {
         const { name, args } = data;
-        const remote = getRemoteEvent(name);
         
+        console.log(`📡 RemoteEvent "${name}" from ${currentPlayerId}`);
+        
+        // First check dynamically registered ServerScripts
+        if (currentGameId && serverScriptsRegistry.has(currentGameId)) {
+            const scripts = serverScriptsRegistry.get(currentGameId);
+            let handled = false;
+            
+            for (const [scriptId, handlers] of scripts) {
+                if (handlers[name]) {
+                    try {
+                        const gameServer = gameServers.get(currentGameId);
+                        const player = gameServer?.playerManager.getPlayer(currentPlayerId);
+                        handlers[name](player, ...(args || []));
+                        handled = true;
+                    } catch (error) {
+                        console.error(`Error in ServerScript handler for ${name}:`, error);
+                    }
+                }
+            }
+            
+            if (handled) {
+                console.log(`✅ RemoteEvent "${name}" handled by ServerScript`);
+                return;
+            }
+        }
+        
+        // Fallback to legacy remote event system
+        const remote = getRemoteEvent(name);
         if (remote && remote.serverListeners) {
             remote.serverListeners.forEach(listener => {
                 if (listener.gameId === currentGameId) {
@@ -756,6 +907,8 @@ io.on('connection', (socket) => {
                     }
                 }
             });
+        } else {
+            console.log(`⚠️ No handler for RemoteEvent "${name}"`);
         }
     });
     
@@ -1101,6 +1254,11 @@ server.listen(PORT, '0.0.0.0', () => {
 ║  ✅ ServerScripts - Run on server, handle game logic                         ║
 ║  ✅ LocalScripts - Sent to client, handle UI and input                       ║
 ║  ✅ ModuleScripts - Shared code between scripts (require()!)                 ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  🔧 NEW FEATURES:                                                            ║
+║  ✅ Dynamic ServerScript registration via registerServerScript               ║
+║  ✅ RemoteEvents automatically route to ServerScript handlers                ║
+║  ✅ Full bidirectional communication                                         ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
     `);
 });
